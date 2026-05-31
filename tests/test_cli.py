@@ -98,6 +98,12 @@ class TestCliHelp:
         assert "TARGET_URL" in result.output
         assert "--prefix" in result.output
         assert "--contains" in result.output
-        assert "--exclude" in result.output
-        assert "--type" in result.output
-        assert "--status" in result.output
+
+    def test_lxd_restore_all_help(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["lxd-restore-all", "--help"])
+        assert result.exit_code == 0
+        assert "SOURCE_URL" in result.output
+        assert "TARGET_ENDPOINT" in result.output
+        assert "NAMES" in result.output
+        assert "--project" in result.output

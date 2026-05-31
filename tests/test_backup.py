@@ -265,3 +265,278 @@ class TestListInstances:
 
         result = list_instances("https://h:8443", "c", "k", "ca")
         assert result == []
+
+
+class TestDoStoreAll:
+    """Tests for do_store_all with mocked list_instances and do_store."""
+
+    def _patch(self, monkeypatch, instance_names, do_store_side_effect=None):
+        from unittest.mock import MagicMock, patch
+        from txwtf_tools import backup
+
+        # Mock list_instances to return given names
+        monkeypatch.setattr(
+            backup, "list_instances",
+            lambda **kwargs: sorted(instance_names),
+        )
+
+        # Mock do_store
+        mock_store = MagicMock()
+        if do_store_side_effect:
+            mock_store.side_effect = do_store_side_effect
+        monkeypatch.setattr(backup, "do_store", mock_store)
+        return mock_store
+
+    def test_backs_up_all_vms(self, monkeypatch):
+        from txwtf_tools.backup import do_store_all
+
+        mock_store = self._patch(monkeypatch, ["vm-a", "vm-b"])
+
+        results = do_store_all(
+            endpoint="https://h:8443",
+            target_url="sftp://host/backups",
+            cert_path="c", key_path="k", ca_path="ca",
+            passphrase="secret",
+        )
+
+        assert results == {"vm-a": "ok", "vm-b": "ok"}
+        assert mock_store.call_count == 2
+
+        # Verify correct SFTP URLs were used
+        calls = mock_store.call_args_list
+        assert calls[0].kwargs["sftp_url"] == "sftp://host/backups/default-vm-a-backup.img.gz.enc"
+        assert calls[1].kwargs["sftp_url"] == "sftp://host/backups/default-vm-b-backup.img.gz.enc"
+
+    def test_no_matching_instances(self, monkeypatch):
+        from txwtf_tools.backup import do_store_all
+
+        self._patch(monkeypatch, [])
+
+        results = do_store_all(
+            endpoint="https://h:8443",
+            target_url="sftp://host/backups",
+            cert_path="c", key_path="k", ca_path="ca",
+            passphrase="secret",
+        )
+
+        assert results == {}
+
+    def test_suffix_no_compress(self, monkeypatch):
+        from txwtf_tools.backup import do_store_all
+
+        mock_store = self._patch(monkeypatch, ["vm-x"])
+
+        do_store_all(
+            endpoint="https://h:8443",
+            target_url="sftp://host/backups",
+            cert_path="c", key_path="k", ca_path="ca",
+            passphrase="secret",
+            compress=False,
+        )
+
+        assert mock_store.call_args.kwargs["sftp_url"].endswith(".img.enc")
+
+    def test_suffix_no_encrypt(self, monkeypatch):
+        from txwtf_tools.backup import do_store_all
+
+        mock_store = self._patch(monkeypatch, ["vm-x"])
+
+        do_store_all(
+            endpoint="https://h:8443",
+            target_url="sftp://host/backups",
+            cert_path="c", key_path="k", ca_path="ca",
+            passphrase="secret",
+            encrypt=False,
+        )
+
+        assert mock_store.call_args.kwargs["sftp_url"].endswith(".img.gz")
+
+    def test_continues_on_failure(self, monkeypatch):
+        from txwtf_tools.backup import do_store_all
+
+        def side_effect(**kwargs):
+            if kwargs["vm_name"] == "vm-a":
+                raise RuntimeError("disk full")
+
+        mock_store = self._patch(monkeypatch, ["vm-a", "vm-b"],
+                                  do_store_side_effect=side_effect)
+
+        results = do_store_all(
+            endpoint="https://h:8443",
+            target_url="sftp://host/backups",
+            cert_path="c", key_path="k", ca_path="ca",
+            passphrase="secret",
+        )
+
+        assert results["vm-a"] == "disk full"
+        assert results["vm-b"] == "ok"
+        assert mock_store.call_count == 2
+
+    def test_custom_project(self, monkeypatch):
+        from txwtf_tools.backup import do_store_all
+
+        mock_store = self._patch(monkeypatch, ["vm-1"])
+
+        do_store_all(
+            endpoint="https://h:8443",
+            target_url="sftp://host/backups",
+            cert_path="c", key_path="k", ca_path="ca",
+            passphrase="secret",
+            project="production",
+        )
+
+        assert mock_store.call_args.kwargs["sftp_url"] == \
+            "sftp://host/backups/production-vm-1-backup.img.gz.enc"
+        assert mock_store.call_args.kwargs["project"] == "production"
+
+
+class TestDoRestoreAll:
+    """Tests for do_restore_all with mocked do_restore."""
+
+    def _patch(self, monkeypatch, do_restore_side_effect=None):
+        from unittest.mock import MagicMock
+        from txwtf_tools import backup
+
+        mock_restore = MagicMock()
+        if do_restore_side_effect:
+            mock_restore.side_effect = do_restore_side_effect
+        monkeypatch.setattr(backup, "do_restore", mock_restore)
+        return mock_restore
+
+    def test_restores_all_vms(self, monkeypatch):
+        from txwtf_tools.backup import do_restore_all
+
+        mock_restore = self._patch(monkeypatch)
+
+        results = do_restore_all(
+            source_url="sftp://host/backups",
+            target_endpoint="https://h:8443",
+            names=["vm-a", "vm-b"],
+            passphrase="secret",
+            cert_path="c", key_path="k",
+        )
+
+        assert results == {"vm-a": "ok", "vm-b": "ok"}
+        assert mock_restore.call_count == 2
+
+        calls = mock_restore.call_args_list
+        assert calls[0].kwargs["sftp_url"] == "sftp://host/backups/default-vm-a-backup.img.gz.enc"
+        assert calls[1].kwargs["sftp_url"] == "sftp://host/backups/default-vm-b-backup.img.gz.enc"
+
+    def test_empty_names(self, monkeypatch):
+        from txwtf_tools.backup import do_restore_all
+
+        self._patch(monkeypatch)
+
+        results = do_restore_all(
+            source_url="sftp://host/backups",
+            target_endpoint="https://h:8443",
+            names=[],
+            passphrase="secret",
+            cert_path="c", key_path="k",
+        )
+
+        assert results == {}
+
+    def test_suffix_no_compress(self, monkeypatch):
+        from txwtf_tools.backup import do_restore_all
+
+        mock_restore = self._patch(monkeypatch)
+
+        do_restore_all(
+            source_url="sftp://host/backups",
+            target_endpoint="https://h:8443",
+            names=["vm-x"],
+            passphrase="secret",
+            cert_path="c", key_path="k",
+            compress=False,
+        )
+
+        assert mock_restore.call_args.kwargs["sftp_url"].endswith(".img.enc")
+
+    def test_suffix_no_encrypt(self, monkeypatch):
+        from txwtf_tools.backup import do_restore_all
+
+        mock_restore = self._patch(monkeypatch)
+
+        do_restore_all(
+            source_url="sftp://host/backups",
+            target_endpoint="https://h:8443",
+            names=["vm-x"],
+            passphrase="secret",
+            cert_path="c", key_path="k",
+            encrypt=False,
+        )
+
+        assert mock_restore.call_args.kwargs["sftp_url"].endswith(".img.gz")
+
+    def test_continues_on_failure(self, monkeypatch):
+        from txwtf_tools.backup import do_restore_all
+
+        def side_effect(**kwargs):
+            if "vm-a" in kwargs["sftp_url"]:
+                raise RuntimeError("connection refused")
+
+        mock_restore = self._patch(monkeypatch, do_restore_side_effect=side_effect)
+
+        results = do_restore_all(
+            source_url="sftp://host/backups",
+            target_endpoint="https://h:8443",
+            names=["vm-a", "vm-b"],
+            passphrase="secret",
+            cert_path="c", key_path="k",
+        )
+
+        assert results["vm-a"] == "connection refused"
+        assert results["vm-b"] == "ok"
+        assert mock_restore.call_count == 2
+
+    def test_custom_project(self, monkeypatch):
+        from txwtf_tools.backup import do_restore_all
+
+        mock_restore = self._patch(monkeypatch)
+
+        do_restore_all(
+            source_url="sftp://host/backups",
+            target_endpoint="https://h:8443",
+            names=["vm-1"],
+            passphrase="secret",
+            cert_path="c", key_path="k",
+            project="production",
+        )
+
+        assert mock_restore.call_args.kwargs["sftp_url"] == \
+            "sftp://host/backups/production-vm-1-backup.img.gz.enc"
+
+    def test_passes_restore_options(self, monkeypatch):
+        from txwtf_tools.backup import do_restore_all
+
+        mock_restore = self._patch(monkeypatch)
+
+        do_restore_all(
+            source_url="sftp://host/backups",
+            target_endpoint="https://h:8443",
+            names=["vm-1"],
+            passphrase="secret",
+            cert_path="c", key_path="k",
+            ca_path="ca.pem",
+            verify_target=True,
+            compress=False,
+            encrypt=True,
+            chunk_size=256 * 1024,
+            max_queue_size=10,
+            rate_limit=1048576.0,
+        )
+
+        kw = mock_restore.call_args.kwargs
+        assert kw["target_endpoint"] == "https://h:8443"
+        assert kw["passphrase"] == "secret"
+        assert kw["cert_path"] == "c"
+        assert kw["key_path"] == "k"
+        assert kw["ca_path"] == "ca.pem"
+        assert kw["verify_target"] is True
+        assert kw["compress"] is False
+        assert kw["encrypt"] is True
+        assert kw["chunk_size"] == 256 * 1024
+        assert kw["max_queue_size"] == 10
+        assert kw["rate_limit"] == 1048576.0

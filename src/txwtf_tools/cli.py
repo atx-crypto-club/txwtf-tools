@@ -488,3 +488,94 @@ def lxd_store_all(
 
     failed = sum(1 for v in results.values() if v != "ok")
     raise SystemExit(1 if failed else 0)
+
+
+# ---------------------------------------------------------------------------
+# lxd-restore-all command
+# ---------------------------------------------------------------------------
+
+@cli.command("lxd-restore-all")
+@click.argument("source_url")
+@click.argument("target_endpoint")
+@click.argument("names", nargs=-1, required=True)
+@click.option(
+    "--passphrase",
+    prompt=True,
+    hide_input=True,
+    envvar="TXWTF_PASSPHRASE",
+    help="Passphrase for symmetric decryption.  [env: TXWTF_PASSPHRASE]",
+)
+@click.option("--cert", required=True, type=click.Path(exists=True),
+    envvar="TXWTF_CERT", help="Client certificate path.  [env: TXWTF_CERT]")
+@click.option("--key", required=True, type=click.Path(exists=True),
+    envvar="TXWTF_KEY", help="Client key path.  [env: TXWTF_KEY]")
+@click.option("--ca", type=click.Path(exists=True), default=None,
+    envvar="TXWTF_CA", help="Target cluster CA cert.  [env: TXWTF_CA]")
+@click.option("--project", default="default", show_default=True,
+    envvar="TXWTF_PROJECT", help="LXD/Incus project name used when creating backups.  [env: TXWTF_PROJECT]")
+@click.option("--no-verify", is_flag=True, default=False, help="Disable TLS verification for target.")
+@click.option("--no-decompress", is_flag=True, default=False, help="Disable decompression.")
+@click.option("--no-decrypt", is_flag=True, default=False, help="Disable decryption.")
+@click.option("--chunk-size", default=512 * 1024, show_default=True, help="Chunk size in bytes.")
+@click.option("--queue-maxsize", default=20, show_default=True, help="Max queue depth.")
+@click.option(
+    "--rate-limit", type=float, default=None,
+    envvar="TXWTF_RATE_LIMIT",
+    help="Max input read rate in bytes/sec (e.g. 1048576 for 1 MB/s). 0 = unlimited.  [env: TXWTF_RATE_LIMIT]",
+)
+def lxd_restore_all(
+    source_url,
+    target_endpoint,
+    names,
+    passphrase,
+    cert,
+    key,
+    ca,
+    project,
+    no_verify,
+    no_decompress,
+    no_decrypt,
+    chunk_size,
+    queue_maxsize,
+    rate_limit,
+):
+    """Restore all named VMs from SFTP backups at SOURCE_URL to TARGET_ENDPOINT.
+
+    The inverse of lxd-store-all: reads each backup from SOURCE_URL,
+    decrypts, decompresses, and streams to the Incus/LXD image import API.
+
+    NAMES are the VM names whose backups should be restored. The backup
+    filenames are derived from the project and VM name using the same
+    convention as lxd-store-all.
+
+    \b
+    Examples:
+      # Restore two VMs from SFTP backups
+      txwtf-tools lxd-restore-all sftp://user@host/backups https://cluster:8443 \\
+        vm-a vm-b --cert client.crt --key client.key
+
+      # Restore with a specific project name
+      txwtf-tools lxd-restore-all sftp://user@host/backups https://cluster:8443 \\
+        web-1 web-2 --project production --cert client.crt --key client.key
+    """
+    from .backup import do_restore_all
+
+    results = do_restore_all(
+        source_url=source_url,
+        target_endpoint=target_endpoint,
+        names=list(names),
+        passphrase=passphrase,
+        cert_path=cert,
+        key_path=key,
+        ca_path=ca,
+        verify_target=not no_verify,
+        project=project,
+        compress=not no_decompress,
+        encrypt=not no_decrypt,
+        chunk_size=chunk_size,
+        max_queue_size=queue_maxsize,
+        rate_limit=rate_limit,
+    )
+
+    failed = sum(1 for v in results.values() if v != "ok")
+    raise SystemExit(1 if failed else 0)

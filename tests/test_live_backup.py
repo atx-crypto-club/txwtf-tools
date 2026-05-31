@@ -38,7 +38,7 @@ import uuid
 
 import pytest
 
-from txwtf_tools.backup import do_restore, make_encrypt_func
+from txwtf_tools.backup import do_restore, do_restore_all, do_store_all, make_encrypt_func
 from txwtf_tools.relay import relay_stream
 
 # ---------------------------------------------------------------------------
@@ -65,6 +65,12 @@ RESTORED_ALIAS = f"txwtf-ci-{RUN_ID}-restored-img"
 BACKUP_FILENAME = f"txwtf-ci-{RUN_ID}-backup.enc"
 PASSPHRASE = f"test-passphrase-{RUN_ID}"
 CANARY_CONTENT = f"txwtf-ci-canary-{RUN_ID}"
+
+# Multi-VM test constants
+MULTI_PREFIX = f"txwtf-ci-{RUN_ID}-m"
+MULTI_COUNT = 2
+MULTI_NAMES = [f"{MULTI_PREFIX}-{i}" for i in range(MULTI_COUNT)]
+MULTI_CANARIES = {name: f"canary-{name}-{RUN_ID}" for name in MULTI_NAMES}
 
 # Root of the repo (parent of tests/)
 _REPO_ROOT = os.path.join(os.path.dirname(__file__), "..")
@@ -148,6 +154,22 @@ def _full_cleanup():
     _cleanup_image(IMAGE_ALIAS)
     _cleanup_image_by_fingerprint()
     _cleanup_sftp_file()
+
+
+def _cleanup_multi_vm():
+    """Best-effort cleanup of all multi-VM test resources."""
+    for name in MULTI_NAMES:
+        _cleanup_container(name)
+        _cleanup_container(f"{name}-restored")
+        _cleanup_image(f"default-{name}-backup")
+    # Remove backup files from SFTP
+    for name in MULTI_NAMES:
+        remote_path = f"{SFTP_DIR}/default-{name}-backup.img.gz.enc"
+        _run(
+            f"ssh -o StrictHostKeyChecking=no {SFTP_USER}@{SFTP_HOST} "
+            f"'rm -f {remote_path}'",
+            check=False,
+        )
 
 
 def _incus_api_ssl_config() -> dict:
@@ -378,3 +400,188 @@ class TestBackupRoundTrip:
             path = os.path.join(_REPO_ROOT, name)
             if os.path.exists(path):
                 os.remove(path)
+
+
+@pytest.mark.live
+class TestMultiVMBackupRoundTrip:
+    """End-to-end multi-VM backup and restore using do_store_all / do_restore_all.
+
+    Creates multiple containers, backs them all up with do_store_all using a
+    name_prefix filter, deletes the originals, restores with do_restore_all,
+    then verifies canary files in each restored container.
+    """
+
+    def test_00_preflight(self):
+        """Verify cluster and SFTP are available, clean any prior resources."""
+        r = _incus("version", check=False)
+        assert r.returncode == 0, f"incus not available: {r.stderr}"
+
+        assert _image_exists(BASE_IMAGE) or TestBackupRoundTrip._try_cache_image(), (
+            f"Base image '{BASE_IMAGE}' not found."
+        )
+
+        for path, desc in [(INCUS_CERT, "client cert"), (INCUS_KEY, "client key")]:
+            assert os.path.isfile(path), f"Missing {desc}: {path}"
+
+        r = _run(
+            f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "
+            f"{SFTP_USER}@{SFTP_HOST} 'echo OK'",
+            check=False,
+        )
+        assert "OK" in r.stdout, f"Cannot reach SFTP host {SFTP_HOST}: {r.stderr}"
+
+        _cleanup_multi_vm()
+
+    def test_01_launch_containers(self):
+        """Launch multiple containers with unique canary files."""
+        _cleanup_multi_vm()
+
+        target = f"--target {INCUS_TARGET}" if INCUS_TARGET else ""
+
+        for name in MULTI_NAMES:
+            r = _incus(f"launch {BASE_IMAGE} {name} {target}", timeout=120)
+            assert r.returncode == 0, f"Failed to launch {name}: {r.stderr}"
+
+            # Wait for ready
+            for _ in range(30):
+                r2 = _incus(f"exec {name} -- echo ready", check=False, timeout=10)
+                if r2.returncode == 0:
+                    break
+                time.sleep(1)
+            else:
+                pytest.fail(f"Container {name} did not become ready in time")
+
+            # Write unique canary
+            canary = MULTI_CANARIES[name]
+            _incus(f'exec {name} -- sh -c "echo {canary} > /canary.txt"', timeout=30)
+            r3 = _incus(f"exec {name} -- cat /canary.txt", timeout=10)
+            assert canary in r3.stdout, f"Canary verify failed for {name}"
+
+        print(f"Launched {MULTI_COUNT} containers: {MULTI_NAMES}")
+
+    def test_02_store_all(self):
+        """Stop all containers and back them all up with do_store_all."""
+        for name in MULTI_NAMES:
+            _incus(f"stop {name}", timeout=120)
+
+        sftp_base = f"sftp://{SFTP_USER}@{SFTP_HOST}{SFTP_DIR}"
+
+        results = do_store_all(
+            endpoint=INCUS_API,
+            target_url=sftp_base,
+            cert_path=INCUS_CERT,
+            key_path=INCUS_KEY,
+            ca_path=INCUS_CERT,  # self-signed — use client cert as CA stand-in
+            passphrase=PASSPHRASE,
+            name_prefix=MULTI_PREFIX,
+            compress=True,
+            encrypt=True,
+            chunk_size=512 * 1024,
+            max_queue_size=20,
+        )
+
+        for name in MULTI_NAMES:
+            assert name in results, f"{name} not in results"
+            assert results[name] == "ok", f"{name} failed: {results[name]}"
+
+        # Store fingerprints for later verification
+        _state["multi_fingerprints"] = {}
+        for name in MULTI_NAMES:
+            alias = f"default-{name}-backup"
+            fp = _get_image_fingerprint(alias)
+            assert fp, f"No fingerprint for {alias}"
+            _state["multi_fingerprints"][name] = fp
+
+        print(f"Backed up {len(results)} VMs to SFTP")
+
+    def test_03_delete_originals(self):
+        """Delete all original containers and their published images."""
+        for name in MULTI_NAMES:
+            _cleanup_container(name)
+            _cleanup_image(f"default-{name}-backup")
+
+        for name in MULTI_NAMES:
+            assert not _container_exists(name), f"Container {name} still exists"
+            assert not _image_exists(f"default-{name}-backup"), f"Image for {name} still exists"
+
+        print("Deleted all original containers and images")
+
+    def test_04_restore_all(self):
+        """Restore all VMs from SFTP backups using do_restore_all."""
+        sftp_base = f"sftp://{SFTP_USER}@{SFTP_HOST}{SFTP_DIR}"
+
+        results = do_restore_all(
+            source_url=sftp_base,
+            target_endpoint=INCUS_API,
+            names=MULTI_NAMES,
+            passphrase=PASSPHRASE,
+            cert_path=INCUS_CERT,
+            key_path=INCUS_KEY,
+            verify_target=False,
+            compress=True,
+            encrypt=True,
+            chunk_size=512 * 1024,
+            max_queue_size=20,
+        )
+
+        for name in MULTI_NAMES:
+            assert name in results, f"{name} not in results"
+            assert results[name] == "ok", f"{name} failed: {results[name]}"
+
+        # Wait for images to appear
+        fingerprints = _state.get("multi_fingerprints", {})
+        for name in MULTI_NAMES:
+            fp = fingerprints.get(name)
+            if not fp:
+                continue
+            for _ in range(60):
+                r = _incus(f"image info {fp}", check=False)
+                if r.returncode == 0:
+                    break
+                time.sleep(2)
+            else:
+                pytest.fail(f"Image {fp} for {name} did not appear after import")
+
+            # Add alias for launching
+            restored_alias = f"default-{name}-backup"
+            _incus(f"image alias create {restored_alias} {fp}", check=False)
+
+        print(f"Restored {len(results)} VMs from SFTP")
+
+    def test_05_verify_restored(self):
+        """Launch each restored container and verify its canary file."""
+        target = f"--target {INCUS_TARGET}" if INCUS_TARGET else ""
+
+        for name in MULTI_NAMES:
+            restored_name = f"{name}-restored"
+            restored_alias = f"default-{name}-backup"
+
+            r = _incus(f"launch {restored_alias} {restored_name} {target}", timeout=120)
+            assert r.returncode == 0, f"Failed to launch restored {name}: {r.stderr}"
+
+            # Wait for ready
+            for _ in range(30):
+                r2 = _incus(f"exec {restored_name} -- echo ready", check=False, timeout=10)
+                if r2.returncode == 0:
+                    break
+                time.sleep(1)
+            else:
+                pytest.fail(f"Restored container {restored_name} did not become ready")
+
+            # Verify canary
+            expected = MULTI_CANARIES[name]
+            r3 = _incus(f"exec {restored_name} -- cat /canary.txt", timeout=10)
+            assert expected in r3.stdout, (
+                f"Canary mismatch for {name}! Expected '{expected}', got '{r3.stdout.strip()}'"
+            )
+            print(f"  ✓ {name}: canary verified")
+
+        print(f"All {MULTI_COUNT} restored containers verified!")
+
+    def test_06_cleanup(self):
+        """Clean up all multi-VM resources."""
+        _cleanup_multi_vm()
+
+        for name in MULTI_NAMES:
+            assert not _container_exists(name)
+            assert not _container_exists(f"{name}-restored")

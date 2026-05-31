@@ -579,3 +579,82 @@ def do_store_all(
     failed = len(results) - ok
     tqdm.write(f"\nDone: {ok} succeeded, {failed} failed out of {len(results)} total.")
     return results
+
+
+def do_restore_all(
+    source_url: str,
+    target_endpoint: str,
+    names: list[str],
+    passphrase: str,
+    cert_path: str,
+    key_path: str,
+    ca_path: str | None = None,
+    verify_target: bool = False,
+    project: str = "default",
+    compress: bool = True,
+    encrypt: bool = True,
+    chunk_size: int = 512 * 1024,
+    max_queue_size: int = 20,
+    rate_limit: float | None = None,
+):
+    """Restore all named VMs from SFTP backups — the inverse of :func:`do_store_all`.
+
+    Each backup is expected at ``<source_url>/<project>-<name>-backup.img``
+    (with ``.gz`` and/or ``.enc`` extensions matching *compress*/*encrypt*).
+
+    Returns a dict mapping VM names to ``"ok"`` or an error message.
+    """
+    if not names:
+        print("No VM names provided.")
+        return {}
+
+    # Build filename suffix (must match what do_store_all produced).
+    suffix = ".img"
+    if compress:
+        suffix += ".gz"
+    if encrypt:
+        suffix += ".enc"
+
+    base = source_url.rstrip("/")
+
+    results: dict[str, str] = {}
+
+    with tqdm(
+        total=len(names),
+        unit="vm",
+        desc="Overall",
+        position=0,
+        leave=True,
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} VMs [{elapsed}<{remaining}]",
+    ) as outer:
+        for name in names:
+            alias = f"{project}-{name}-backup"
+            src = f"{base}/{alias}{suffix}"
+            outer.set_postfix_str(name, refresh=True)
+
+            try:
+                do_restore(
+                    sftp_url=src,
+                    target_endpoint=target_endpoint,
+                    passphrase=passphrase,
+                    cert_path=cert_path,
+                    key_path=key_path,
+                    ca_path=ca_path,
+                    verify_target=verify_target,
+                    compress=compress,
+                    encrypt=encrypt,
+                    chunk_size=chunk_size,
+                    max_queue_size=max_queue_size,
+                    rate_limit=rate_limit,
+                )
+                results[name] = "ok"
+            except Exception as exc:
+                results[name] = str(exc)
+                tqdm.write(f"  ✗ '{name}' failed: {exc}")
+
+            outer.update(1)
+
+    ok = sum(1 for v in results.values() if v == "ok")
+    failed = len(results) - ok
+    tqdm.write(f"\nDone: {ok} succeeded, {failed} failed out of {len(results)} total.")
+    return results
