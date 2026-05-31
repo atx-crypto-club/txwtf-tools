@@ -53,6 +53,7 @@ jobs:
           TXWTF_SFTP_DIR: /media/catx-easystore/txwtf-tools-tests
           TXWTF_INCUS_TARGET: star-00
           TXWTF_BASE_IMAGE: ubuntu-24.04-container
+          TXWTF_INCUS_API: https://10.66.77.217:8443
         run: .venv/bin/pytest tests/test_live_backup.py -m live -v --tb=long -s
 
       - name: Cleanup on failure

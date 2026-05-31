@@ -1,18 +1,19 @@
 """
-Live backup round-trip integration test.
+Live backup round-trip integration test — streaming via Incus API.
 
 Requires a running Incus cluster with:
   - ``incus`` CLI accessible to the runner user
+  - TLS client cert at ``~/.config/incus/client.{crt,key}`` trusted by the cluster
   - A cached container image aliased ``ubuntu-24.04-container``
   - SFTP access from the runner to ``TXWTF_SFTP_HOST`` (default: star-01)
   - A writable storage directory on the SFTP host
 
-The test exercises the full relay pipeline:
+The test exercises the full relay pipeline with NO intermediate temp files:
   1. Launch a temp container, write a canary file, stop & publish as image
-  2. Export image → local tarball → encrypt → relay to SFTP backup
-  3. Delete local tarball, image, and container
-  4. Relay from SFTP backup → decrypt → local tarball
-  5. Import image, launch restored container, verify canary file
+  2. Stream image directly from Incus HTTPS export API → encrypt → SFTP backup
+  3. Delete the image and container from the cluster
+  4. Stream from SFTP backup → decrypt → Incus HTTPS import API
+  5. Launch restored container, verify canary file
   6. Clean up everything
 
 All resources use the ``txwtf-ci-`` prefix so they cannot collide with
@@ -24,20 +25,20 @@ Env vars (all optional, with sane defaults):
   TXWTF_SFTP_DIR       Remote directory for backups   (default: /media/catx-easystore/txwtf-tools-tests)
   TXWTF_INCUS_TARGET   Incus cluster member to target (default: unset = auto)
   TXWTF_BASE_IMAGE     Local image alias to launch    (default: ubuntu-24.04-container)
+  TXWTF_INCUS_API      Incus API base URL             (default: https://10.66.77.217:8443)
+  TXWTF_INCUS_CERT     Path to client cert            (default: ~/.config/incus/client.crt)
+  TXWTF_INCUS_KEY      Path to client key             (default: ~/.config/incus/client.key)
 """
 
 import asyncio
-import hashlib
 import os
-import shutil
 import subprocess
-import tempfile
 import time
 import uuid
 
 import pytest
 
-from txwtf_tools.backup import chain_functions, get_fixed_base64_from_utf8_string
+from txwtf_tools.backup import get_fixed_base64_from_utf8_string
 from txwtf_tools.relay import relay_stream
 
 # ---------------------------------------------------------------------------
@@ -49,6 +50,11 @@ SFTP_USER = os.environ.get("TXWTF_SFTP_USER", "tfx")
 SFTP_DIR = os.environ.get("TXWTF_SFTP_DIR", "/media/catx-easystore/txwtf-tools-tests")
 INCUS_TARGET = os.environ.get("TXWTF_INCUS_TARGET", "")
 BASE_IMAGE = os.environ.get("TXWTF_BASE_IMAGE", "ubuntu-24.04-container")
+
+_home = os.path.expanduser("~")
+INCUS_API = os.environ.get("TXWTF_INCUS_API", "https://10.66.77.217:8443")
+INCUS_CERT = os.environ.get("TXWTF_INCUS_CERT", f"{_home}/.config/incus/client.crt")
+INCUS_KEY = os.environ.get("TXWTF_INCUS_KEY", f"{_home}/.config/incus/client.key")
 
 # Unique run ID to avoid collisions between concurrent CI runs
 RUN_ID = uuid.uuid4().hex[:8]
@@ -79,13 +85,22 @@ def _incus(subcmd: str, **kwargs) -> subprocess.CompletedProcess:
 
 
 def _container_exists(name: str) -> bool:
-    r = _incus(f"list --format csv -c n", check=False)
+    r = _incus("list --format csv -c n", check=False)
     return name in r.stdout.splitlines()
 
 
 def _image_exists(alias: str) -> bool:
-    r = _incus(f"image alias list --format csv", check=False)
+    r = _incus("image alias list --format csv", check=False)
     return any(alias == line.split(",")[0] for line in r.stdout.splitlines())
+
+
+def _get_image_fingerprint(alias: str) -> str | None:
+    """Get the fingerprint for an image alias."""
+    r = _incus(f"image info {alias}", check=False)
+    for line in r.stdout.splitlines():
+        if line.strip().startswith("Fingerprint:"):
+            return line.split(":", 1)[1].strip()
+    return None
 
 
 def _cleanup_container(name: str):
@@ -103,26 +118,29 @@ def _cleanup_image(alias: str):
 def _cleanup_sftp_file():
     """Remove the backup file from the SFTP host."""
     remote_path = f"{SFTP_DIR}/{BACKUP_FILENAME}"
-    _run(f"ssh -o StrictHostKeyChecking=no {SFTP_USER}@{SFTP_HOST} 'rm -f {remote_path}'", check=False)
+    _run(
+        f"ssh -o StrictHostKeyChecking=no {SFTP_USER}@{SFTP_HOST} "
+        f"'rm -f {remote_path}'",
+        check=False,
+    )
 
 
-def _full_cleanup(tmpdir: str | None = None):
+def _full_cleanup():
     """Best-effort cleanup of all resources created by this test run."""
     _cleanup_container(RESTORED_NAME)
     _cleanup_container(CONTAINER_NAME)
     _cleanup_image(RESTORED_ALIAS)
     _cleanup_image(IMAGE_ALIAS)
     _cleanup_sftp_file()
-    if tmpdir and os.path.isdir(tmpdir):
-        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def _sha256_file(path: str) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+def _incus_api_ssl_config() -> dict:
+    """SSL config dict for relay_stream to talk to the Incus HTTPS API."""
+    return {
+        "client_cert": INCUS_CERT,
+        "client_key": INCUS_KEY,
+        "verify": False,  # server cert SAN doesn't match IP
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -144,14 +162,10 @@ def _make_decrypt_func(passphrase: str):
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Shared state across ordered tests (populated by earlier tests)
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(scope="module")
-def tmpdir():
-    d = tempfile.mkdtemp(prefix="txwtf-ci-")
-    yield d
-    shutil.rmtree(d, ignore_errors=True)
+_state: dict = {}
 
 
 # ---------------------------------------------------------------------------
@@ -160,10 +174,11 @@ def tmpdir():
 
 @pytest.mark.live
 class TestBackupRoundTrip:
-    """End-to-end encrypted backup and restore via SFTP relay."""
+    """End-to-end encrypted backup and restore — streaming through relay_stream
+    with no intermediate temp files on disk."""
 
     def test_00_preflight(self):
-        """Verify incus CLI is available and the base image exists."""
+        """Verify incus CLI, base image, TLS certs, and SFTP access."""
         r = _incus("version", check=False)
         assert r.returncode == 0, f"incus not available: {r.stderr}"
 
@@ -171,6 +186,20 @@ class TestBackupRoundTrip:
             f"Base image '{BASE_IMAGE}' not found. "
             "Run: incus image copy images:ubuntu/24.04 local: --alias ubuntu-24.04-container"
         )
+
+        for path, desc in [
+            (INCUS_CERT, "client cert"),
+            (INCUS_KEY, "client key"),
+        ]:
+            assert os.path.isfile(path), f"Missing {desc}: {path}"
+
+        # Verify SFTP host is reachable
+        r = _run(
+            f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "
+            f"{SFTP_USER}@{SFTP_HOST} 'echo OK'",
+            check=False,
+        )
+        assert "OK" in r.stdout, f"Cannot reach SFTP host {SFTP_HOST}: {r.stderr}"
 
     @staticmethod
     def _try_cache_image() -> bool:
@@ -189,7 +218,7 @@ class TestBackupRoundTrip:
         r = _incus(f"launch {BASE_IMAGE} {CONTAINER_NAME} {target}", timeout=120)
         assert r.returncode == 0, f"Failed to launch: {r.stderr}"
 
-        # Wait for container networking
+        # Wait for container to be ready
         for _ in range(30):
             r2 = _incus(f"exec {CONTAINER_NAME} -- echo ready", check=False, timeout=10)
             if r2.returncode == 0:
@@ -215,108 +244,88 @@ class TestBackupRoundTrip:
         assert r.returncode == 0, f"Publish failed: {r.stderr}"
         assert _image_exists(IMAGE_ALIAS)
 
-    def test_03_export_image(self, tmpdir):
-        """Export the image to a local tarball."""
-        export_path = os.path.join(tmpdir, "export")
-        r = _incus(f"image export {IMAGE_ALIAS} {export_path}", timeout=300)
-        assert r.returncode == 0, f"Export failed: {r.stderr}"
+        fp = _get_image_fingerprint(IMAGE_ALIAS)
+        assert fp, f"Could not get fingerprint for {IMAGE_ALIAS}"
+        _state["fingerprint"] = fp
+        print(f"Image fingerprint: {fp}")
 
-        # incus image export appends .tar.gz
-        tarball = export_path + ".tar.gz"
-        assert os.path.isfile(tarball), f"Expected {tarball} to exist"
-        size = os.path.getsize(tarball)
-        assert size > 1_000_000, f"Export too small ({size} bytes), something is wrong"
-        print(f"Exported image: {size / 1024 / 1024:.1f} MB")
+    def test_03_stream_to_sftp(self):
+        """Stream image from Incus API → encrypt → SFTP (no temp files)."""
+        fp = _state.get("fingerprint")
+        assert fp, "No fingerprint — did test_02 run?"
 
-    def test_04_relay_to_sftp(self, tmpdir):
-        """Encrypt and relay the exported image to SFTP backup."""
-        tarball = os.path.join(tmpdir, "export.tar.gz")
-        assert os.path.isfile(tarball), "Export tarball missing — did test_03 run?"
-
-        original_hash = _sha256_file(tarball)
-        with open(os.path.join(tmpdir, "original.sha256"), "w") as f:
-            f.write(original_hash)
-        print(f"Original SHA-256: {original_hash}")
-
+        export_url = f"{INCUS_API}/1.0/images/{fp}/export"
         sftp_url = f"sftp://{SFTP_USER}@{SFTP_HOST}{SFTP_DIR}/{BACKUP_FILENAME}"
-        file_url = f"file://{tarball}"
 
         encrypt_func = _make_encrypt_func(PASSPHRASE)
 
         asyncio.run(relay_stream(
-            get_url=file_url,
+            get_url=export_url,
             post_urls=[sftp_url],
             process_func=encrypt_func,
             chunk_size=512 * 1024,
             queue_maxsize=20,
+            get_config=_incus_api_ssl_config(),
             post_configs=[{"known_hosts": None}],
         ))
 
-        # Verify remote file exists
+        # Verify remote file exists and has content
         remote_path = f"{SFTP_DIR}/{BACKUP_FILENAME}"
         r = _run(
             f"ssh -o StrictHostKeyChecking=no {SFTP_USER}@{SFTP_HOST} "
             f"'test -f {remote_path} && stat --format=%s {remote_path}'",
         )
         remote_size = int(r.stdout.strip())
-        assert remote_size > 0, "Remote backup file is empty"
-        print(f"Remote backup: {remote_size / 1024 / 1024:.1f} MB (encrypted)")
+        assert remote_size > 1_000_000, f"Remote backup too small ({remote_size} bytes)"
+        _state["remote_size"] = remote_size
+        print(f"Streamed encrypted backup to SFTP: {remote_size / 1024 / 1024:.1f} MB")
 
-    def test_05_delete_originals(self, tmpdir):
-        """Delete the local export, image, and container."""
-        tarball = os.path.join(tmpdir, "export.tar.gz")
-        if os.path.isfile(tarball):
-            os.remove(tarball)
-
+    def test_04_delete_originals(self):
+        """Delete the image and container from the cluster."""
         _cleanup_image(IMAGE_ALIAS)
         _cleanup_container(CONTAINER_NAME)
 
-        assert not _container_exists(CONTAINER_NAME)
-        assert not _image_exists(IMAGE_ALIAS)
-        assert not os.path.isfile(tarball)
+        assert not _container_exists(CONTAINER_NAME), "Container still exists"
+        assert not _image_exists(IMAGE_ALIAS), "Image still exists"
+        print("Deleted original image and container from cluster")
 
-    def test_06_relay_from_sftp(self, tmpdir):
-        """Relay the encrypted backup from SFTP, decrypt, and save locally."""
+    def test_05_stream_from_sftp(self):
+        """Stream from SFTP → decrypt → Incus import API (no temp files)."""
         sftp_url = f"sftp://{SFTP_USER}@{SFTP_HOST}{SFTP_DIR}/{BACKUP_FILENAME}"
-        restored_tarball = os.path.join(tmpdir, "restored.tar.gz")
-        file_url = f"file://{restored_tarball}"
+        import_url = f"{INCUS_API}/1.0/images"
 
         decrypt_func = _make_decrypt_func(PASSPHRASE)
 
         asyncio.run(relay_stream(
             get_url=sftp_url,
-            post_urls=[file_url],
+            post_urls=[import_url],
             process_func=decrypt_func,
             chunk_size=512 * 1024,
             queue_maxsize=20,
             get_config={"known_hosts": None},
+            post_headers=[{
+                "Content-Type": "application/octet-stream",
+                "X-Incus-public": "false",
+            }],
+            post_configs=[_incus_api_ssl_config()],
         ))
 
-        assert os.path.isfile(restored_tarball), "Restored tarball not created"
+        # Wait for image to appear (import is async)
+        fp = _state.get("fingerprint")
+        for _ in range(60):
+            r = _incus(f"image info {fp}", check=False)
+            if r.returncode == 0:
+                break
+            time.sleep(2)
+        else:
+            pytest.fail(f"Image {fp} did not appear after import")
 
-        # Verify SHA-256 matches original
-        restored_hash = _sha256_file(restored_tarball)
-        with open(os.path.join(tmpdir, "original.sha256")) as f:
-            original_hash = f.read().strip()
-
-        assert restored_hash == original_hash, (
-            f"Hash mismatch!\n  original: {original_hash}\n  restored: {restored_hash}"
-        )
-        print(f"SHA-256 verified: {restored_hash}")
-
-    def test_07_import_image(self, tmpdir):
-        """Import the restored tarball as an Incus image."""
-        restored_tarball = os.path.join(tmpdir, "restored.tar.gz")
-        assert os.path.isfile(restored_tarball)
-
-        r = _incus(
-            f"image import {restored_tarball} --alias {RESTORED_ALIAS}",
-            timeout=300,
-        )
-        assert r.returncode == 0, f"Import failed: {r.stderr}"
+        # Add an alias for the restored image
+        _incus(f"image alias create {RESTORED_ALIAS} {fp}")
         assert _image_exists(RESTORED_ALIAS)
+        print(f"Restored image from SFTP backup (fingerprint: {fp})")
 
-    def test_08_launch_restored(self):
+    def test_06_launch_restored(self):
         """Launch a container from the restored image and verify the canary."""
         target = f"--target {INCUS_TARGET}" if INCUS_TARGET else ""
         r = _incus(
@@ -341,9 +350,9 @@ class TestBackupRoundTrip:
         )
         print("Canary file verified in restored container!")
 
-    def test_09_cleanup(self, tmpdir):
+    def test_07_cleanup(self):
         """Clean up all resources."""
-        _full_cleanup(tmpdir)
+        _full_cleanup()
 
         assert not _container_exists(CONTAINER_NAME)
         assert not _container_exists(RESTORED_NAME)
