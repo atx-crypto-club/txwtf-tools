@@ -126,12 +126,25 @@ def _cleanup_sftp_file():
     )
 
 
+def _cleanup_image_by_fingerprint():
+    """Delete an image by fingerprint if it exists but has no alias.
+
+    Covers the case where an import succeeded but alias creation didn't."""
+    fp = _state.get("fingerprint")
+    if not fp:
+        return
+    r = _incus(f"image info {fp}", check=False)
+    if r.returncode == 0:
+        _incus(f"image delete {fp}", check=False, timeout=60)
+
+
 def _full_cleanup():
     """Best-effort cleanup of all resources created by this test run."""
     _cleanup_container(RESTORED_NAME)
     _cleanup_container(CONTAINER_NAME)
     _cleanup_image(RESTORED_ALIAS)
     _cleanup_image(IMAGE_ALIAS)
+    _cleanup_image_by_fingerprint()
     _cleanup_sftp_file()
 
 

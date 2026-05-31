@@ -60,7 +60,9 @@ jobs:
       - name: Cleanup on failure
         if: failure()
         run: |
-          # Best-effort cleanup of any leftover txwtf-ci- resources
+          # Best-effort cleanup of any leftover txwtf-ci- resources.
+          # Safe for concurrent runs: each test uses a unique uuid4 RUN_ID,
+          # and this runner only processes one job at a time (single runner).
           for c in $(incus list --format csv -c n | grep '^txwtf-ci-'); do
             incus delete "$c" --force 2>/dev/null || true
           done
