@@ -44,9 +44,17 @@ def sanitize_uri(uri: str) -> str:
     return uri
 
 
-def create_ssl_connector(client_cert_path, client_key_path, ca_cert_path=None):
-    """Return an :class:`aiohttp.TCPConnector` configured for mTLS."""
-    if ca_cert_path:
+def create_ssl_connector(client_cert_path, client_key_path, ca_cert_path=None, verify=True):
+    """Return an :class:`aiohttp.TCPConnector` configured for mTLS.
+
+    When *verify* is False, server certificate verification is disabled
+    (useful for self-signed clusters).
+    """
+    if not verify:
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+    elif ca_cert_path:
         ssl_ctx = ssl.create_default_context(cafile=ca_cert_path)
     else:
         ssl_ctx = ssl.create_default_context()
@@ -67,6 +75,7 @@ async def get_input_stream_size(uri: str, **input_kwargs: Any) -> int:
                 input_kwargs["cert_file"],
                 input_kwargs["key_file"],
                 input_kwargs.get("ca_file"),
+                verify=bool(input_kwargs.get("ca_file")),
             )
 
         async with aiohttp.ClientSession(raise_for_status=True, **session_args) as session:
@@ -120,6 +129,7 @@ async def get_input_stream(uri: str, **input_kwargs: Any) -> AsyncGenerator[byte
                 input_kwargs["cert_file"],
                 input_kwargs["key_file"],
                 input_kwargs.get("ca_file"),
+                verify=bool(input_kwargs.get("ca_file")),
             )
 
         async def gen():
@@ -300,6 +310,7 @@ async def process_stream(
                     kw["cert_file"],
                     kw["key_file"],
                     kw.get("ca_file"),
+                    verify=bool(kw.get("ca_file")),
                 )
 
             async def post_task(uri=uri, kw=kw, gen=gen, sa=session_args):
