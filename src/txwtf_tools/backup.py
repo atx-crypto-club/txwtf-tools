@@ -10,6 +10,7 @@ import struct
 import time
 import zlib
 
+import aiohttp
 from cryptography.fernet import Fernet
 from tqdm import tqdm
 
@@ -194,9 +195,17 @@ def prepare_backup(
 
 
 def cleanup_backup(image, snapshot):
-    """Remove the temporary snapshot (image is kept)."""
+    """Remove the temporary image and snapshot created by prepare_backup."""
+    if image:
+        try:
+            image.delete()
+        except Exception:
+            pass
     if snapshot:
-        snapshot.delete()
+        try:
+            snapshot.delete()
+        except Exception:
+            pass
 
 
 def list_instances(
@@ -390,6 +399,7 @@ def do_store(
             "http_kwargs": {
                 "headers": {"User-Agent": "txwtf-tools 0.1.0"},
                 "allow_redirects": True,
+                "timeout": aiohttp.ClientTimeout(total=None, sock_read=600),
             },
         }
         if ca_path:

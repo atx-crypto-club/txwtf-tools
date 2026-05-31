@@ -78,9 +78,15 @@ async def get_input_stream_size(uri: str, **input_kwargs: Any) -> int:
                 verify=bool(input_kwargs.get("ca_file")),
             )
 
-        async with aiohttp.ClientSession(raise_for_status=True, **session_args) as session:
-            async with session.get(uri, **input_kwargs.get("http_kwargs", {})) as resp:
-                return int(resp.headers.get("Content-Length", 0))
+        async with aiohttp.ClientSession(**session_args) as session:
+            # Use HEAD to avoid downloading the full body just for the size.
+            try:
+                async with session.head(uri, **input_kwargs.get("http_kwargs", {})) as resp:
+                    if resp.status < 400:
+                        return int(resp.headers.get("Content-Length", 0))
+            except Exception:
+                pass
+            return 0
 
     elif scheme == "sftp":
         host = parse.hostname
@@ -348,6 +354,9 @@ async def process_stream(
                     **kw.get("sftp_kwargs", {}),
                 ) as conn:
                     async with conn.start_sftp_client() as sftp:
+                        parent = os.path.dirname(path)
+                        if parent:
+                            await sftp.makedirs(parent, exist_ok=True)
                         async with sftp.open(path, "wb") as file:
                             async for chunk in gen:
                                 await file.write(chunk)
