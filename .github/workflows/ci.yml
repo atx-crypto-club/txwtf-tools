@@ -28,7 +28,41 @@ jobs:
         run: poetry install --all-extras
 
       - name: Run unit tests
-        run: poetry run pytest tests/ -m "not integration" -v --tb=short
+        run: poetry run pytest tests/ -m "not integration and not live" -v --tb=short
 
       - name: Run integration tests
-        run: poetry run pytest tests/ -m integration -v --tb=short
+        run: poetry run pytest tests/ -m "integration and not live" -v --tb=short
+
+  live-backup-test:
+    runs-on: [self-hosted, linux, incus, star-00]
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python venv
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install .
+          .venv/bin/pip install pytest pytest-asyncio
+
+      - name: Run live backup round-trip test
+        env:
+          TXWTF_SFTP_HOST: star-01
+          TXWTF_SFTP_USER: tfx
+          TXWTF_SFTP_DIR: /media/catx-easystore/txwtf-tools-tests
+          TXWTF_INCUS_TARGET: star-00
+          TXWTF_BASE_IMAGE: ubuntu-24.04-container
+        run: .venv/bin/pytest tests/test_live_backup.py -m live -v --tb=long -s
+
+      - name: Cleanup on failure
+        if: failure()
+        run: |
+          # Best-effort cleanup of any leftover txwtf-ci- resources
+          for c in $(incus list --format csv -c n | grep '^txwtf-ci-'); do
+            incus delete "$c" --force 2>/dev/null || true
+          done
+          for img in $(incus image alias list --format csv | grep '^txwtf-ci-' | cut -d, -f1); do
+            incus image delete "$img" 2>/dev/null || true
+          done
+          ssh -o StrictHostKeyChecking=no tfx@star-01 'rm -f /media/catx-easystore/txwtf-tools-tests/txwtf-ci-*' 2>/dev/null || true
