@@ -39,6 +39,10 @@ def cli():
 @click.option(
     "--post-ca", type=click.Path(exists=True), default=None, help="CA cert for output (HTTPS)."
 )
+@click.option(
+    "--rate-limit", type=float, default=None,
+    help="Max input read rate in bytes/sec (e.g. 1048576 for 1 MB/s). 0 = unlimited.",
+)
 def relay(
     get_url,
     post_urls,
@@ -51,6 +55,7 @@ def relay(
     post_cert,
     post_key,
     post_ca,
+    rate_limit,
 ):
     """Relay a stream from GET_URL to one or more POST_URLS.
 
@@ -87,6 +92,7 @@ def relay(
         monitor_queues_flag=monitor,
         get_config=get_config,
         post_configs=post_configs,
+        rate_limit=rate_limit,
     )
 
 
@@ -106,6 +112,10 @@ def relay(
 @click.option("--target-project", required=True, help="Project name on the target cluster.")
 @click.option("--chunk-size", default=1024 * 1024, show_default=True, help="Chunk size in bytes.")
 @click.option("--queue-maxsize", default=128, show_default=True, help="Max queue depth.")
+@click.option(
+    "--rate-limit", type=float, default=None,
+    help="Max input read rate in bytes/sec (e.g. 1048576 for 1 MB/s). 0 = unlimited.",
+)
 def lxd_copy(
     project,
     vm_name,
@@ -118,6 +128,7 @@ def lxd_copy(
     target_project,
     chunk_size,
     queue_maxsize,
+    rate_limit,
 ):
     """Copy an LXD/Incus VM image from SOURCE_ENDPOINT to TARGET_ENDPOINT.
 
@@ -138,6 +149,7 @@ def lxd_copy(
         target_project=target_project,
         chunk_size=chunk_size,
         max_queue_size=queue_maxsize,
+        rate_limit=rate_limit,
     )
 
 
@@ -164,6 +176,10 @@ def lxd_copy(
 @click.option("--no-encrypt", is_flag=True, default=False, help="Disable encryption.")
 @click.option("--chunk-size", default=1024 * 1024, show_default=True, help="Chunk size in bytes.")
 @click.option("--queue-maxsize", default=512, show_default=True, help="Max queue depth.")
+@click.option(
+    "--rate-limit", type=float, default=None,
+    help="Max input read rate in bytes/sec (e.g. 1048576 for 1 MB/s). 0 = unlimited.",
+)
 def lxd_store(
     project,
     vm_name,
@@ -177,6 +193,7 @@ def lxd_store(
     no_encrypt,
     chunk_size,
     queue_maxsize,
+    rate_limit,
 ):
     """Compress, encrypt, and stream an LXD/Incus VM image to SFTP_URL.
 
@@ -197,4 +214,5 @@ def lxd_store(
         encrypt=not no_encrypt,
         chunk_size=chunk_size,
         max_queue_size=queue_maxsize,
+        rate_limit=rate_limit,
     )

@@ -115,6 +115,7 @@ def do_copy(
     target_project: str,
     chunk_size: int = 1024 * 1024,
     max_queue_size: int = 128,
+    rate_limit: float | None = None,
 ):
     """Copy an LXD/Incus VM image between clusters using the relay stream."""
     pylxd = _get_pylxd()
@@ -159,6 +160,9 @@ def do_copy(
             ],
         }
 
+        if rate_limit:
+            relay_args["rate_limit"] = rate_limit
+
         relay(**relay_args)
 
         target_client = pylxd.Client(
@@ -192,6 +196,7 @@ def do_store(
     encrypt: bool = True,
     chunk_size: int = 1024 * 1024,
     max_queue_size: int = 512,
+    rate_limit: float | None = None,
 ):
     """Compress + encrypt an LXD/Incus image and stream it to SFTP."""
     image, snapshot, _image_alias = prepare_backup(
@@ -253,6 +258,7 @@ def do_store(
                         "finalize_callback": flush_process,
                     }
                 ],
+                "rate_limit": rate_limit,
             }
         ]
 

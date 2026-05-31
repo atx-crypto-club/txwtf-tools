@@ -9,6 +9,7 @@ optional per-chunk processing (compression, encryption, etc.), and tqdm progress
 import asyncio
 import os
 import ssl
+import time
 from typing import Callable
 from urllib.parse import urlparse
 
@@ -16,6 +17,37 @@ import aiofiles
 import aiohttp
 import asyncssh
 from tqdm.asyncio import tqdm
+
+
+class TokenBucketRateLimiter:
+    """Async token-bucket rate limiter.
+
+    Tokens represent bytes.  Call :meth:`acquire` before emitting each
+    chunk to throttle throughput to *rate* bytes per second.  A value of
+    ``0`` or ``None`` disables the limiter (no waiting).
+    """
+
+    def __init__(self, rate: float | None):
+        self._rate = rate or 0
+        # Start with one chunk_size worth of burst (capped at 1 second of
+        # tokens) so the very first read isn't delayed, while still
+        # preventing a large initial burst.
+        self._tokens = float(self._rate) if self._rate else 0
+        self._last = time.monotonic()
+
+    async def acquire(self, amount: int) -> None:
+        if not self._rate:
+            return
+        while True:
+            now = time.monotonic()
+            elapsed = now - self._last
+            self._last = now
+            self._tokens = min(self._rate, self._tokens + elapsed * self._rate)
+            if self._tokens >= amount:
+                self._tokens -= amount
+                return
+            deficit = amount - self._tokens
+            await asyncio.sleep(deficit / self._rate)
 
 
 def create_ssl_value(ssl_config: dict | None, is_https: bool):
@@ -61,6 +93,7 @@ async def http_consumer(
     headers: dict,
     chunk_size: int,
     config: dict | None,
+    rate_limiter: TokenBucketRateLimiter | None = None,
 ):
     """Streams data from HTTP/HTTPS GET request and fans out chunks into queues."""
     is_https = get_url.startswith("https://")
@@ -79,6 +112,8 @@ async def http_consumer(
             pbar.total = content_length
 
             async for chunk in resp.content.iter_chunked(chunk_size):
+                if rate_limiter:
+                    await rate_limiter.acquire(len(chunk))
                 await asyncio.gather(*(q.put(chunk) for q in queues))
                 pbar.update(len(chunk))
 
@@ -91,6 +126,7 @@ async def sftp_consumer(
     pbar: tqdm,
     chunk_size: int,
     config: dict | None,
+    rate_limiter: TokenBucketRateLimiter | None = None,
 ):
     """Streams data from SFTP file and fans out chunks into queues."""
     parsed = urlparse(get_url)
@@ -122,6 +158,8 @@ async def sftp_consumer(
                     chunk = await f.read(chunk_size)
                     if not chunk:
                         break
+                    if rate_limiter:
+                        await rate_limiter.acquire(len(chunk))
                     await asyncio.gather(*(q.put(chunk) for q in queues))
                     pbar.update(len(chunk))
 
@@ -133,6 +171,7 @@ async def file_consumer(
     queues: list[asyncio.Queue],
     pbar: tqdm,
     chunk_size: int,
+    rate_limiter: TokenBucketRateLimiter | None = None,
 ):
     """Streams data from local file and fans out chunks into queues."""
     parsed = urlparse(get_url)
@@ -146,6 +185,8 @@ async def file_consumer(
             chunk = await f.read(chunk_size)
             if not chunk:
                 break
+            if rate_limiter:
+                await rate_limiter.acquire(len(chunk))
             await asyncio.gather(*(q.put(chunk) for q in queues))
             pbar.update(len(chunk))
 
@@ -159,15 +200,16 @@ async def consume(
     headers: dict,
     chunk_size: int,
     config: dict | None,
+    rate_limiter: TokenBucketRateLimiter | None = None,
 ):
     """General consumer dispatcher based on URL scheme."""
     scheme = urlparse(get_url).scheme.lower()
     if scheme in ("http", "https"):
-        await http_consumer(get_url, queues, pbar, headers, chunk_size, config)
+        await http_consumer(get_url, queues, pbar, headers, chunk_size, config, rate_limiter)
     elif scheme == "sftp":
-        await sftp_consumer(get_url, queues, pbar, chunk_size, config)
+        await sftp_consumer(get_url, queues, pbar, chunk_size, config, rate_limiter)
     elif scheme == "file":
-        await file_consumer(get_url, queues, pbar, chunk_size)
+        await file_consumer(get_url, queues, pbar, chunk_size, rate_limiter)
     else:
         raise ValueError(f"Unsupported scheme: {scheme}")
 
@@ -313,6 +355,7 @@ async def relay_stream(
     get_config: dict | None = None,
     post_configs: list[dict | None] | None = None,
     per_queue_maxsize: list[int] | None = None,
+    rate_limit: float | None = None,
 ):
     """
     Main relay function.
@@ -325,6 +368,9 @@ async def relay_stream(
 
     Use *per_queue_maxsize* to give individual destinations different buffer depths
     (e.g. a larger buffer for a known-slow sink).  Falls back to *queue_maxsize*.
+
+    *rate_limit* caps the input read rate to the given number of bytes per second.
+    ``0`` or ``None`` means unlimited.
     """
     if process_func is None:
         process_func = lambda x: x  # noqa: E731
@@ -349,6 +395,8 @@ async def relay_stream(
 
     queues = [asyncio.Queue(maxsize=sz) for sz in per_queue_maxsize]
 
+    rate_limiter = TokenBucketRateLimiter(rate_limit) if rate_limit else None
+
     in_pbar = tqdm(total=0, unit="B", unit_scale=True, desc="Input stream")
     out_pbars = [
         tqdm(total=in_pbar.total, unit="B", unit_scale=True, desc=f"Output stream {i}")
@@ -362,7 +410,7 @@ async def relay_stream(
             for i in range(len(queues))
         ]
 
-    consumer_task = asyncio.create_task(consume(get_url, queues, in_pbar, get_headers, chunk_size, get_config))
+    consumer_task = asyncio.create_task(consume(get_url, queues, in_pbar, get_headers, chunk_size, get_config, rate_limiter))
 
     producer_tasks = [
         asyncio.create_task(produce(post_url, queue, process_func, post_header, out_pbar, post_config))

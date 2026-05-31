@@ -1052,3 +1052,125 @@ class TestSlowConsumerFanout:
             fast_proc.join(timeout=5)
             med_proc.join(timeout=5)
             slow_proc.join(timeout=5)
+
+
+@pytest.mark.integration
+class TestRateLimitedRelay:
+    """Verify that the rate_limit parameter measurably throttles HTTP relays."""
+
+    def test_http_rate_limited(self, integration_dir):
+        """HTTP relay with rate_limit should be slower than without."""
+        src_file = integration_dir / "source.bin"
+        dst_unlimited = integration_dir / "dest_unlimited.bin"
+        dst_limited = integration_dir / "dest_limited.bin"
+        data = os.urandom(100_000)  # 100 KB
+        src_file.write_bytes(data)
+
+        src_started = multiprocessing.Event()
+        sink_started = multiprocessing.Event()
+
+        src_proc = multiprocessing.Process(
+            target=_run_http_source_server,
+            args=("127.0.0.1", 18130, str(src_file), src_started),
+            daemon=True,
+        )
+        sink_proc = multiprocessing.Process(
+            target=_run_http_sink_server,
+            args=("127.0.0.1", 18131, str(dst_unlimited), sink_started),
+            daemon=True,
+        )
+        src_proc.start()
+        sink_proc.start()
+
+        try:
+            _wait_for_event(src_started)
+            _wait_for_event(sink_started)
+
+            from txwtf_tools.relay import relay
+
+            # Unlimited run
+            t0 = time.monotonic()
+            relay(
+                get_url="http://127.0.0.1:18130/data",
+                post_urls=["http://127.0.0.1:18131/upload"],
+                chunk_size=10_000,
+                queue_maxsize=8,
+                get_config={"verify": False},
+                post_configs=[{"verify": False}],
+            )
+            fast_elapsed = time.monotonic() - t0
+            assert dst_unlimited.read_bytes() == data
+        finally:
+            src_proc.terminate()
+            sink_proc.terminate()
+            src_proc.join(timeout=5)
+            sink_proc.join(timeout=5)
+
+        # Now do a rate-limited run with fresh servers
+        src_started2 = multiprocessing.Event()
+        sink_started2 = multiprocessing.Event()
+
+        src_proc2 = multiprocessing.Process(
+            target=_run_http_source_server,
+            args=("127.0.0.1", 18132, str(src_file), src_started2),
+            daemon=True,
+        )
+        sink_proc2 = multiprocessing.Process(
+            target=_run_http_sink_server,
+            args=("127.0.0.1", 18133, str(dst_limited), sink_started2),
+            daemon=True,
+        )
+        src_proc2.start()
+        sink_proc2.start()
+
+        try:
+            _wait_for_event(src_started2)
+            _wait_for_event(sink_started2)
+
+            # Rate-limited to 50 KB/s → 100 KB should take ~2s
+            t0 = time.monotonic()
+            relay(
+                get_url="http://127.0.0.1:18132/data",
+                post_urls=["http://127.0.0.1:18133/upload"],
+                chunk_size=10_000,
+                queue_maxsize=8,
+                get_config={"verify": False},
+                post_configs=[{"verify": False}],
+                rate_limit=50_000,
+            )
+            slow_elapsed = time.monotonic() - t0
+            assert dst_limited.read_bytes() == data
+
+            print(f"\n  Unlimited: {fast_elapsed:.3f}s")
+            print(f"  Rate-limited (50 KB/s): {slow_elapsed:.3f}s")
+            assert slow_elapsed > fast_elapsed + 0.5, (
+                f"rate-limited ({slow_elapsed:.2f}s) should be much slower "
+                f"than unlimited ({fast_elapsed:.2f}s)"
+            )
+        finally:
+            src_proc2.terminate()
+            sink_proc2.terminate()
+            src_proc2.join(timeout=5)
+            sink_proc2.join(timeout=5)
+
+    def test_file_relay_rate_limited(self, integration_dir):
+        """File-to-file relay with rate_limit should take at least expected time."""
+        src = integration_dir / "src.bin"
+        dst = integration_dir / "dst.bin"
+        data = os.urandom(50_000)  # 50 KB
+        src.write_bytes(data)
+
+        from txwtf_tools.relay import relay
+
+        t0 = time.monotonic()
+        relay(
+            get_url=f"file://{src}",
+            post_urls=[f"file://{dst}"],
+            chunk_size=10_000,
+            queue_maxsize=4,
+            rate_limit=25_000,  # 25 KB/s → ~2s
+        )
+        elapsed = time.monotonic() - t0
+
+        assert dst.read_bytes() == data
+        assert elapsed >= 1.0, f"Expected >= 1.0s, got {elapsed:.2f}s"

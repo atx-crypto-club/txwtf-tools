@@ -18,6 +18,8 @@ import aiohttp
 import asyncssh
 from tqdm.asyncio import tqdm as async_tqdm
 
+from .relay import TokenBucketRateLimiter
+
 CHUNK_SIZE = 1024 * 1024  # 1 MB
 MAX_QUEUE_SIZE = 128
 
@@ -257,8 +259,13 @@ async def process_stream(
     output_uris: list[str],
     input_kwargs: dict[str, Any] | None = None,
     output_kwargs_list: list[dict[str, Any]] | None = None,
+    rate_limit: float | None = None,
 ) -> None:
-    """Pipeline *input_uri* to every URI in *output_uris* via fan-out queues."""
+    """Pipeline *input_uri* to every URI in *output_uris* via fan-out queues.
+
+    *rate_limit* caps the input read rate to the given number of bytes per
+    second.  ``0`` or ``None`` means unlimited.
+    """
     if input_kwargs is None:
         input_kwargs = {}
     if output_kwargs_list is None:
@@ -350,7 +357,11 @@ async def process_stream(
         else:
             raise ValueError(f"Unknown scheme for output: {scheme}")
 
+    rate_limiter = TokenBucketRateLimiter(rate_limit) if rate_limit else None
+
     async for chunk in input_gen:
+        if rate_limiter:
+            await rate_limiter.acquire(len(chunk))
         for q in all_queues:
             await q.put(chunk)
 
@@ -368,6 +379,7 @@ async def stream_main(stream_pairs: list[dict[str, Any]]) -> None:
             pair["output_uris"],
             input_kwargs=pair.get("input_kwargs", {}),
             output_kwargs_list=pair.get("output_kwargs_list"),
+            rate_limit=pair.get("rate_limit"),
         )
         for pair in stream_pairs
     ]
