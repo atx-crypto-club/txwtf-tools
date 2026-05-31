@@ -1,0 +1,64 @@
+[project]
+name = "txwtf-tools"
+version = "0.1.0"
+description = "Stream relay and LXD/Incus backup migration tools — pipe data between HTTP, SFTP, and file streams without temporary files on disk."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "atx-crypto-club" },
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Utilities",
+]
+
+dependencies = [
+    "click>=8.0",
+    "aiohttp>=3.9",
+    "aiofiles>=23.0",
+    "asyncssh>=2.14",
+    "tqdm>=4.60",
+    "cryptography>=41.0",
+]
+
+[project.optional-dependencies]
+lxd = ["pylxd>=2.3"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.urls]
+Homepage = "https://github.com/atx-crypto-club/txwtf-tools"
+Repository = "https://github.com/atx-crypto-club/txwtf-tools"
+Issues = "https://github.com/atx-crypto-club/txwtf-tools/issues"
+
+[project.scripts]
+txwtf-tools = "txwtf_tools.cli:cli"
+
+[build-system]
+requires = ["poetry-core>=2.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+packages = [{ include = "txwtf_tools", from = "src" }]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
