@@ -79,12 +79,10 @@ async def http_consumer(
             pbar.total = content_length
 
             async for chunk in resp.content.iter_chunked(chunk_size):
-                for q in queues:
-                    await q.put(chunk)
+                await asyncio.gather(*(q.put(chunk) for q in queues))
                 pbar.update(len(chunk))
 
-            for q in queues:
-                await q.put(None)
+            await asyncio.gather(*(q.put(None) for q in queues))
 
 
 async def sftp_consumer(
@@ -124,12 +122,10 @@ async def sftp_consumer(
                     chunk = await f.read(chunk_size)
                     if not chunk:
                         break
-                    for q in queues:
-                        await q.put(chunk)
+                    await asyncio.gather(*(q.put(chunk) for q in queues))
                     pbar.update(len(chunk))
 
-            for q in queues:
-                await q.put(None)
+            await asyncio.gather(*(q.put(None) for q in queues))
 
 
 async def file_consumer(
@@ -150,12 +146,10 @@ async def file_consumer(
             chunk = await f.read(chunk_size)
             if not chunk:
                 break
-            for q in queues:
-                await q.put(chunk)
+            await asyncio.gather(*(q.put(chunk) for q in queues))
             pbar.update(len(chunk))
 
-    for q in queues:
-        await q.put(None)
+    await asyncio.gather(*(q.put(None) for q in queues))
 
 
 async def consume(
@@ -312,6 +306,7 @@ async def relay_stream(
     monitor_queues_flag: bool = False,
     get_config: dict | None = None,
     post_configs: list[dict | None] | None = None,
+    per_queue_maxsize: list[int] | None = None,
 ):
     """
     Main relay function.
@@ -320,6 +315,10 @@ async def relay_stream(
     with *process_func*, and streams to every URL in *post_urls* concurrently.
 
     Backpressure is handled via bounded asyncio queues (one per destination).
+    Queue puts happen concurrently so a slow consumer cannot block faster ones.
+
+    Use *per_queue_maxsize* to give individual destinations different buffer depths
+    (e.g. a larger buffer for a known-slow sink).  Falls back to *queue_maxsize*.
     """
     if process_func is None:
         process_func = lambda x: x  # noqa: E731
@@ -337,7 +336,12 @@ async def relay_stream(
     elif len(post_configs) != len(post_urls):
         raise ValueError("post_configs must match the number of post_urls")
 
-    queues = [asyncio.Queue(maxsize=queue_maxsize) for _ in post_urls]
+    if per_queue_maxsize is None:
+        per_queue_maxsize = [queue_maxsize] * len(post_urls)
+    elif len(per_queue_maxsize) != len(post_urls):
+        raise ValueError("per_queue_maxsize must match the number of post_urls")
+
+    queues = [asyncio.Queue(maxsize=sz) for sz in per_queue_maxsize]
 
     in_pbar = tqdm(total=0, unit="B", unit_scale=True, desc="Input stream")
     out_pbars = [
