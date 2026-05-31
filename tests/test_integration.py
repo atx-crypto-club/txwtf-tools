@@ -1052,3 +1052,314 @@ class TestSlowConsumerFanout:
             fast_proc.join(timeout=5)
             med_proc.join(timeout=5)
             slow_proc.join(timeout=5)
+
+
+@pytest.mark.integration
+class TestRateLimitedRelay:
+    """Verify that the rate_limit parameter measurably throttles HTTP relays."""
+
+    def test_http_rate_limited(self, integration_dir):
+        """HTTP relay with rate_limit should be slower than without."""
+        src_file = integration_dir / "source.bin"
+        dst_unlimited = integration_dir / "dest_unlimited.bin"
+        dst_limited = integration_dir / "dest_limited.bin"
+        data = os.urandom(100_000)  # 100 KB
+        src_file.write_bytes(data)
+
+        src_started = multiprocessing.Event()
+        sink_started = multiprocessing.Event()
+
+        src_proc = multiprocessing.Process(
+            target=_run_http_source_server,
+            args=("127.0.0.1", 18130, str(src_file), src_started),
+            daemon=True,
+        )
+        sink_proc = multiprocessing.Process(
+            target=_run_http_sink_server,
+            args=("127.0.0.1", 18131, str(dst_unlimited), sink_started),
+            daemon=True,
+        )
+        src_proc.start()
+        sink_proc.start()
+
+        try:
+            _wait_for_event(src_started)
+            _wait_for_event(sink_started)
+
+            from txwtf_tools.relay import relay
+
+            # Unlimited run
+            t0 = time.monotonic()
+            relay(
+                get_url="http://127.0.0.1:18130/data",
+                post_urls=["http://127.0.0.1:18131/upload"],
+                chunk_size=10_000,
+                queue_maxsize=8,
+                get_config={"verify": False},
+                post_configs=[{"verify": False}],
+            )
+            fast_elapsed = time.monotonic() - t0
+            assert dst_unlimited.read_bytes() == data
+        finally:
+            src_proc.terminate()
+            sink_proc.terminate()
+            src_proc.join(timeout=5)
+            sink_proc.join(timeout=5)
+
+        # Now do a rate-limited run with fresh servers
+        src_started2 = multiprocessing.Event()
+        sink_started2 = multiprocessing.Event()
+
+        src_proc2 = multiprocessing.Process(
+            target=_run_http_source_server,
+            args=("127.0.0.1", 18132, str(src_file), src_started2),
+            daemon=True,
+        )
+        sink_proc2 = multiprocessing.Process(
+            target=_run_http_sink_server,
+            args=("127.0.0.1", 18133, str(dst_limited), sink_started2),
+            daemon=True,
+        )
+        src_proc2.start()
+        sink_proc2.start()
+
+        try:
+            _wait_for_event(src_started2)
+            _wait_for_event(sink_started2)
+
+            # Rate-limited to 50 KB/s → 100 KB should take ~2s
+            t0 = time.monotonic()
+            relay(
+                get_url="http://127.0.0.1:18132/data",
+                post_urls=["http://127.0.0.1:18133/upload"],
+                chunk_size=10_000,
+                queue_maxsize=8,
+                get_config={"verify": False},
+                post_configs=[{"verify": False}],
+                rate_limit=50_000,
+            )
+            slow_elapsed = time.monotonic() - t0
+            assert dst_limited.read_bytes() == data
+
+            print(f"\n  Unlimited: {fast_elapsed:.3f}s")
+            print(f"  Rate-limited (50 KB/s): {slow_elapsed:.3f}s")
+            assert slow_elapsed > fast_elapsed + 0.5, (
+                f"rate-limited ({slow_elapsed:.2f}s) should be much slower "
+                f"than unlimited ({fast_elapsed:.2f}s)"
+            )
+        finally:
+            src_proc2.terminate()
+            sink_proc2.terminate()
+            src_proc2.join(timeout=5)
+            sink_proc2.join(timeout=5)
+
+    def test_file_relay_rate_limited(self, integration_dir):
+        """File-to-file relay with rate_limit should take at least expected time."""
+        src = integration_dir / "src.bin"
+        dst = integration_dir / "dst.bin"
+        data = os.urandom(50_000)  # 50 KB
+        src.write_bytes(data)
+
+        from txwtf_tools.relay import relay
+
+        t0 = time.monotonic()
+        relay(
+            get_url=f"file://{src}",
+            post_urls=[f"file://{dst}"],
+            chunk_size=10_000,
+            queue_maxsize=4,
+            rate_limit=25_000,  # 25 KB/s → ~2s
+        )
+        elapsed = time.monotonic() - t0
+
+        assert dst.read_bytes() == data
+        assert elapsed >= 1.0, f"Expected >= 1.0s, got {elapsed:.2f}s"
+
+
+class TestRelayTransforms:
+    """End-to-end tests for relay's encrypt, decrypt, compress, decompress,
+    and finalize_func — exercising get_process_func (input-side) and
+    process_func + finalize_func (output-side) independently and combined."""
+
+    def test_encrypt_file_decrypt(self, integration_dir):
+        """Encrypt on output, then decrypt on input."""
+        from txwtf_tools.backup import make_decrypt_func, make_encrypt_func
+        from txwtf_tools.relay import relay
+
+        src = integration_dir / "plain.bin"
+        enc = integration_dir / "encrypted.bin"
+        dst = integration_dir / "decrypted.bin"
+        data = os.urandom(50_000)
+        src.write_bytes(data)
+
+        passphrase = "integration-test-key"
+
+        relay(
+            get_url=f"file://{src}",
+            post_urls=[f"file://{enc}"],
+            process_func=make_encrypt_func(passphrase),
+            chunk_size=8192,
+            queue_maxsize=8,
+        )
+
+        enc_data = enc.read_bytes()
+        assert len(enc_data) > len(data), "Encrypted data should be larger"
+        assert enc_data != data
+
+        relay(
+            get_url=f"file://{enc}",
+            post_urls=[f"file://{dst}"],
+            get_process_func=make_decrypt_func(passphrase),
+            chunk_size=8192,
+            queue_maxsize=8,
+        )
+
+        assert dst.read_bytes() == data
+
+    def test_compress_file_decompress(self, integration_dir):
+        """Compress on output (with finalize), then decompress on input."""
+        from txwtf_tools.backup import make_compress_func, make_decompress_func
+        from txwtf_tools.relay import relay
+
+        src = integration_dir / "plain.bin"
+        gz = integration_dir / "compressed.gz"
+        dst = integration_dir / "decompressed.bin"
+        data = b"ABCDEFGH" * 10_000
+        src.write_bytes(data)
+
+        compress, finalize = make_compress_func()
+        relay(
+            get_url=f"file://{src}",
+            post_urls=[f"file://{gz}"],
+            process_func=compress,
+            finalize_func=finalize,
+            chunk_size=8192,
+            queue_maxsize=8,
+        )
+
+        gz_data = gz.read_bytes()
+        assert len(gz_data) < len(data), "Compressed should be smaller for repetitive data"
+
+        relay(
+            get_url=f"file://{gz}",
+            post_urls=[f"file://{dst}"],
+            get_process_func=make_decompress_func(),
+            chunk_size=8192,
+            queue_maxsize=8,
+        )
+
+        assert dst.read_bytes() == data
+
+    def test_compress_encrypt_file_decrypt_decompress(self, integration_dir):
+        """Full compress+encrypt → file → decrypt+decompress round-trip.
+
+        Output side: compress then encrypt (with chained finalize).
+        Input side: decrypt then decompress.
+        Mirrors do_store → do_restore pipeline at the relay level."""
+        from txwtf_tools.backup import (
+            chain_functions,
+            make_compress_func,
+            make_decompress_func,
+            make_decrypt_func,
+            make_encrypt_func,
+        )
+        from txwtf_tools.relay import relay
+
+        src = integration_dir / "plain.bin"
+        stored = integration_dir / "stored.bin"
+        dst = integration_dir / "restored.bin"
+        data = b"ABCDEFGH" * 10_000
+        src.write_bytes(data)
+
+        passphrase = "compress-encrypt-test"
+
+        # Store: compress + encrypt on output side
+        compress, compress_finalize = make_compress_func()
+        encrypt = make_encrypt_func(passphrase)
+
+        def store_process(chunk: bytes) -> bytes:
+            compressed = compress(chunk)
+            if compressed:
+                return encrypt(compressed)
+            return b""
+
+        def store_finalize() -> bytes:
+            flushed = compress_finalize()
+            if flushed:
+                return encrypt(flushed)
+            return b""
+
+        relay(
+            get_url=f"file://{src}",
+            post_urls=[f"file://{stored}"],
+            process_func=store_process,
+            finalize_func=store_finalize,
+            chunk_size=8192,
+            queue_maxsize=8,
+        )
+
+        stored_data = stored.read_bytes()
+        assert len(stored_data) < len(data)
+        assert stored_data != data
+
+        # Restore: decrypt + decompress on input side
+        restore_func = chain_functions(
+            make_decrypt_func(passphrase),
+            make_decompress_func(),
+        )
+
+        relay(
+            get_url=f"file://{stored}",
+            post_urls=[f"file://{dst}"],
+            get_process_func=restore_func,
+            chunk_size=8192,
+            queue_maxsize=8,
+        )
+
+        assert dst.read_bytes() == data
+
+    def test_reencrypt_with_different_passphrases(self, integration_dir):
+        """Encrypt → re-encrypt with different key → decrypt — proves relay
+        can decrypt input and encrypt output simultaneously with independent
+        passphrases."""
+        from txwtf_tools.backup import make_decrypt_func, make_encrypt_func
+        from txwtf_tools.relay import relay
+
+        src = integration_dir / "plain.bin"
+        enc_a = integration_dir / "encrypted_a.bin"
+        enc_b = integration_dir / "encrypted_b.bin"
+        dst = integration_dir / "decrypted.bin"
+        data = os.urandom(80_000)
+        src.write_bytes(data)
+
+        key_a = "first-passphrase"
+        key_b = "second-passphrase"
+
+        relay(
+            get_url=f"file://{src}",
+            post_urls=[f"file://{enc_a}"],
+            process_func=make_encrypt_func(key_a),
+            chunk_size=8192,
+            queue_maxsize=8,
+        )
+
+        relay(
+            get_url=f"file://{enc_a}",
+            post_urls=[f"file://{enc_b}"],
+            get_process_func=make_decrypt_func(key_a),
+            process_func=make_encrypt_func(key_b),
+            chunk_size=8192,
+            queue_maxsize=8,
+        )
+
+        assert enc_a.read_bytes() != enc_b.read_bytes()
+
+        relay(
+            get_url=f"file://{enc_b}",
+            post_urls=[f"file://{dst}"],
+            get_process_func=make_decrypt_func(key_b),
+            chunk_size=8192,
+            queue_maxsize=8,
+        )
+
+        assert dst.read_bytes() == data

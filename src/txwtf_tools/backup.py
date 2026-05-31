@@ -6,6 +6,7 @@ all without writing temporary files to disk.
 
 import base64
 import hashlib
+import struct
 import time
 import zlib
 
@@ -32,6 +33,100 @@ def chain_functions(*funcs):
         return current
 
     return chained
+
+
+# ---------------------------------------------------------------------------
+# Length-prefixed Fernet encrypt / decrypt helpers
+# ---------------------------------------------------------------------------
+#
+# Each Fernet token is variable-length.  When tokens are written to a flat
+# byte stream (e.g. SFTP file) we prepend a 4-byte big-endian length so the
+# reader can reliably reassemble tokens from fixed-size read chunks.
+
+def make_encrypt_func(passphrase: str):
+    """Return a function that Fernet-encrypts a chunk and prepends a 4-byte
+    big-endian length header."""
+    key = get_fixed_base64_from_utf8_string(passphrase)
+    enc = Fernet(key)
+
+    def encrypt(chunk: bytes) -> bytes:
+        if not chunk:
+            return b""
+        token = enc.encrypt(chunk)
+        return struct.pack(">I", len(token)) + token
+
+    return encrypt
+
+
+def make_decrypt_func(passphrase: str):
+    """Return a *stateful* function that accumulates bytes and decrypts
+    complete length-prefixed Fernet tokens.
+
+    Safe for sequential use from ``relay_stream``'s ``process_and_yield``
+    (each call is awaited before the next).
+    """
+    key = get_fixed_base64_from_utf8_string(passphrase)
+    dec = Fernet(key)
+    buf = bytearray()
+
+    def decrypt(chunk: bytes) -> bytes:
+        if not chunk:
+            return b""
+        buf.extend(chunk)
+        out = bytearray()
+        while len(buf) >= 4:
+            token_len = struct.unpack(">I", buf[:4])[0]
+            if len(buf) < 4 + token_len:
+                break
+            token = bytes(buf[4 : 4 + token_len])
+            del buf[: 4 + token_len]
+            out.extend(dec.decrypt(token))
+        return bytes(out)
+
+    return decrypt
+
+
+# ---------------------------------------------------------------------------
+# Compression / decompression helpers (gzip format)
+# ---------------------------------------------------------------------------
+
+def make_compress_func(level: int = 9):
+    """Return ``(compress_func, finalize_func)`` for gzip compression.
+
+    *compress_func* is a stateful per-chunk compressor.  It may return empty
+    bytes when zlib buffers internally — the relay skips empty results
+    automatically.
+
+    *finalize_func* must be called once after the last chunk to flush the
+    gzip trailer.  Pass it as ``finalize_func`` to :func:`relay_stream`.
+    """
+    compressor = zlib.compressobj(level, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+
+    def compress(chunk: bytes) -> bytes:
+        if not chunk:
+            return b""
+        return compressor.compress(chunk)
+
+    def finalize() -> bytes:
+        return compressor.flush(zlib.Z_FINISH)
+
+    return compress, finalize
+
+
+def make_decompress_func():
+    """Return a decompression function for gzip data.
+
+    Stateful — each call decompresses whatever is available from the
+    internal zlib buffer.
+    """
+    decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+
+    def decompress(chunk: bytes) -> bytes:
+        if not chunk:
+            return b""
+        return decompressor.decompress(chunk)
+
+    return decompress
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +210,7 @@ def do_copy(
     target_project: str,
     chunk_size: int = 1024 * 1024,
     max_queue_size: int = 128,
+    rate_limit: float | None = None,
 ):
     """Copy an LXD/Incus VM image between clusters using the relay stream."""
     pylxd = _get_pylxd()
@@ -159,6 +255,9 @@ def do_copy(
             ],
         }
 
+        if rate_limit:
+            relay_args["rate_limit"] = rate_limit
+
         relay(**relay_args)
 
         target_client = pylxd.Client(
@@ -192,6 +291,7 @@ def do_store(
     encrypt: bool = True,
     chunk_size: int = 1024 * 1024,
     max_queue_size: int = 512,
+    rate_limit: float | None = None,
 ):
     """Compress + encrypt an LXD/Incus image and stream it to SFTP."""
     image, snapshot, _image_alias = prepare_backup(
@@ -213,7 +313,8 @@ def do_store(
 
         def encrypt_chunk(chunk: bytes) -> bytes:
             if chunk:
-                return encryptor.encrypt(chunk)
+                token = encryptor.encrypt(chunk)
+                return struct.pack(">I", len(token)) + token
 
         chunk_chain = [pass_chunk]
         if compress:
@@ -226,7 +327,10 @@ def do_store(
         def flush_process():
             compressed_flush = compressor.flush(zlib.Z_FINISH)
             if compressed_flush:
-                return encryptor.encrypt(compressed_flush)
+                if encrypt:
+                    token = encryptor.encrypt(compressed_flush)
+                    return struct.pack(">I", len(token)) + token
+                return compressed_flush
             return compressed_flush
 
         export_url = f"{source_endpoint}/1.0/images/{image.fingerprint}/export"
@@ -253,6 +357,7 @@ def do_store(
                         "finalize_callback": flush_process,
                     }
                 ],
+                "rate_limit": rate_limit,
             }
         ]
 
@@ -260,3 +365,69 @@ def do_store(
 
     finally:
         cleanup_backup(image, snapshot)
+
+
+def do_restore(
+    sftp_url: str,
+    target_endpoint: str,
+    passphrase: str,
+    cert_path: str,
+    key_path: str,
+    ca_path: str | None = None,
+    verify_target: bool = False,
+    compress: bool = True,
+    encrypt: bool = True,
+    chunk_size: int = 512 * 1024,
+    max_queue_size: int = 20,
+    rate_limit: float | None = None,
+    image_alias: str | None = None,
+):
+    """Restore an LXD/Incus image from an encrypted SFTP backup — the
+    inverse of :func:`do_store`.
+
+    Reads length-prefixed Fernet tokens from *sftp_url*, decrypts and
+    decompresses them, then streams the raw image to the Incus import API
+    at *target_endpoint*.
+    """
+    import_url = f"{target_endpoint}/1.0/images"
+
+    # Build input-side process function: decrypt then decompress (reverse of store).
+    # Applied on the input (SFTP read) side via get_process_func so the raw
+    # decrypted/decompressed bytes are streamed directly to the Incus API.
+    funcs: list = []
+    if encrypt:
+        funcs.append(make_decrypt_func(passphrase))
+    if compress:
+        funcs.append(make_decompress_func())
+
+    get_process_func = chain_functions(*funcs) if funcs else None
+
+    ssl_config: dict = {
+        "client_cert": cert_path,
+        "client_key": key_path,
+        "verify": verify_target,
+    }
+    if ca_path:
+        ssl_config["ca_cert"] = ca_path
+
+    relay_kwargs: dict = {
+        "get_url": sftp_url,
+        "post_urls": [import_url],
+        "chunk_size": chunk_size,
+        "queue_maxsize": max_queue_size,
+        "get_config": {"known_hosts": None},
+        "post_headers": [
+            {
+                "Content-Type": "application/octet-stream",
+                "X-LXD-public": "false",
+            }
+        ],
+        "post_configs": [ssl_config],
+    }
+
+    if get_process_func is not None:
+        relay_kwargs["get_process_func"] = get_process_func
+    if rate_limit:
+        relay_kwargs["rate_limit"] = rate_limit
+
+    relay(**relay_kwargs)

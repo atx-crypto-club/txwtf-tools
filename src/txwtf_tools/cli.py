@@ -39,6 +39,20 @@ def cli():
 @click.option(
     "--post-ca", type=click.Path(exists=True), default=None, help="CA cert for output (HTTPS)."
 )
+@click.option(
+    "--rate-limit", type=float, default=None,
+    help="Max input read rate in bytes/sec (e.g. 1048576 for 1 MB/s). 0 = unlimited.",
+)
+@click.option(
+    "--decrypt-passphrase", default=None, hide_input=True,
+    help="Passphrase to decrypt the input stream (length-prefixed Fernet).",
+)
+@click.option(
+    "--encrypt-passphrase", default=None, hide_input=True,
+    help="Passphrase to encrypt the output stream (length-prefixed Fernet).",
+)
+@click.option("--compress", is_flag=True, default=False, help="Gzip-compress the output stream.")
+@click.option("--decompress", is_flag=True, default=False, help="Gzip-decompress the input stream.")
 def relay(
     get_url,
     post_urls,
@@ -51,12 +65,65 @@ def relay(
     post_cert,
     post_key,
     post_ca,
+    rate_limit,
+    decrypt_passphrase,
+    encrypt_passphrase,
+    compress,
+    decompress,
 ):
     """Relay a stream from GET_URL to one or more POST_URLS.
 
     Supports http(s), sftp, and file:// schemes on both sides.
     """
     from .relay import relay as do_relay
+
+    get_process_func = None
+    process_func = None
+    finalize_func = None
+
+    if decompress:
+        from .backup import make_decompress_func
+        get_process_func = make_decompress_func()
+
+    if decrypt_passphrase:
+        from .backup import make_decrypt_func
+        if get_process_func:
+            from .backup import chain_functions
+            get_process_func = chain_functions(get_process_func, make_decrypt_func(decrypt_passphrase))
+        else:
+            get_process_func = make_decrypt_func(decrypt_passphrase)
+
+    if compress:
+        from .backup import make_compress_func
+        compress_func, finalize_func = make_compress_func()
+        process_func = compress_func
+
+    if encrypt_passphrase:
+        from .backup import make_encrypt_func
+        enc = make_encrypt_func(encrypt_passphrase)
+        if process_func:
+            from .backup import chain_functions
+            old_process = process_func
+            old_finalize = finalize_func
+
+            def chained_process(chunk: bytes) -> bytes:
+                compressed = old_process(chunk)
+                if compressed:
+                    return enc(compressed)
+                return b""
+
+            def chained_finalize() -> bytes:
+                parts = bytearray()
+                if old_finalize:
+                    flushed = old_finalize()
+                    if flushed:
+                        parts.extend(enc(flushed))
+                return bytes(parts)
+
+            process_func = chained_process
+            finalize_func = chained_finalize
+        else:
+            process_func = enc
 
     get_config = None
     if get_cert and get_key:
@@ -87,6 +154,10 @@ def relay(
         monitor_queues_flag=monitor,
         get_config=get_config,
         post_configs=post_configs,
+        rate_limit=rate_limit,
+        get_process_func=get_process_func,
+        process_func=process_func,
+        finalize_func=finalize_func,
     )
 
 
@@ -106,6 +177,10 @@ def relay(
 @click.option("--target-project", required=True, help="Project name on the target cluster.")
 @click.option("--chunk-size", default=1024 * 1024, show_default=True, help="Chunk size in bytes.")
 @click.option("--queue-maxsize", default=128, show_default=True, help="Max queue depth.")
+@click.option(
+    "--rate-limit", type=float, default=None,
+    help="Max input read rate in bytes/sec (e.g. 1048576 for 1 MB/s). 0 = unlimited.",
+)
 def lxd_copy(
     project,
     vm_name,
@@ -118,6 +193,7 @@ def lxd_copy(
     target_project,
     chunk_size,
     queue_maxsize,
+    rate_limit,
 ):
     """Copy an LXD/Incus VM image from SOURCE_ENDPOINT to TARGET_ENDPOINT.
 
@@ -138,6 +214,7 @@ def lxd_copy(
         target_project=target_project,
         chunk_size=chunk_size,
         max_queue_size=queue_maxsize,
+        rate_limit=rate_limit,
     )
 
 
@@ -164,6 +241,10 @@ def lxd_copy(
 @click.option("--no-encrypt", is_flag=True, default=False, help="Disable encryption.")
 @click.option("--chunk-size", default=1024 * 1024, show_default=True, help="Chunk size in bytes.")
 @click.option("--queue-maxsize", default=512, show_default=True, help="Max queue depth.")
+@click.option(
+    "--rate-limit", type=float, default=None,
+    help="Max input read rate in bytes/sec (e.g. 1048576 for 1 MB/s). 0 = unlimited.",
+)
 def lxd_store(
     project,
     vm_name,
@@ -177,6 +258,7 @@ def lxd_store(
     no_encrypt,
     chunk_size,
     queue_maxsize,
+    rate_limit,
 ):
     """Compress, encrypt, and stream an LXD/Incus VM image to SFTP_URL.
 
@@ -197,4 +279,68 @@ def lxd_store(
         encrypt=not no_encrypt,
         chunk_size=chunk_size,
         max_queue_size=queue_maxsize,
+        rate_limit=rate_limit,
+    )
+
+
+# ---------------------------------------------------------------------------
+# lxd-restore command
+# ---------------------------------------------------------------------------
+
+@cli.command("lxd-restore")
+@click.argument("sftp_url")
+@click.argument("target_endpoint")
+@click.option(
+    "--passphrase",
+    prompt=True,
+    hide_input=True,
+    help="Passphrase for symmetric decryption.",
+)
+@click.option("--cert", required=True, type=click.Path(exists=True), help="Client certificate path.")
+@click.option("--key", required=True, type=click.Path(exists=True), help="Client key path.")
+@click.option("--ca", type=click.Path(exists=True), default=None, help="Target cluster CA cert.")
+@click.option("--no-verify", is_flag=True, default=False, help="Disable TLS verification for target.")
+@click.option("--no-decompress", is_flag=True, default=False, help="Disable decompression.")
+@click.option("--no-decrypt", is_flag=True, default=False, help="Disable decryption.")
+@click.option("--chunk-size", default=512 * 1024, show_default=True, help="Chunk size in bytes.")
+@click.option("--queue-maxsize", default=20, show_default=True, help="Max queue depth.")
+@click.option(
+    "--rate-limit", type=float, default=None,
+    help="Max input read rate in bytes/sec (e.g. 1048576 for 1 MB/s). 0 = unlimited.",
+)
+def lxd_restore(
+    sftp_url,
+    target_endpoint,
+    passphrase,
+    cert,
+    key,
+    ca,
+    no_verify,
+    no_decompress,
+    no_decrypt,
+    chunk_size,
+    queue_maxsize,
+    rate_limit,
+):
+    """Restore an LXD/Incus image from an encrypted SFTP backup at SFTP_URL
+    to TARGET_ENDPOINT.
+
+    The inverse of lxd-store: reads from SFTP, decrypts, decompresses,
+    and streams to the Incus/LXD image import API.
+    """
+    from .backup import do_restore
+
+    do_restore(
+        sftp_url=sftp_url,
+        target_endpoint=target_endpoint,
+        passphrase=passphrase,
+        cert_path=cert,
+        key_path=key,
+        ca_path=ca,
+        verify_target=not no_verify,
+        compress=not no_decompress,
+        encrypt=not no_decrypt,
+        chunk_size=chunk_size,
+        max_queue_size=queue_maxsize,
+        rate_limit=rate_limit,
     )
