@@ -176,6 +176,11 @@ async def process_and_yield(queue: asyncio.Queue, process_func, out_pbar: tqdm):
     """
     Async generator that pulls from queue, processes chunks (in executor if CPU-bound),
     and yields processed chunks for streaming output.
+
+    Empty results from *process_func* (e.g. a stateful decryptor that hasn't
+    accumulated a full token yet) are silently skipped — this avoids sending a
+    zero-length chunk in HTTP chunked transfer encoding, which would terminate
+    the stream prematurely.
     """
     loop = asyncio.get_running_loop()
     while True:
@@ -183,8 +188,9 @@ async def process_and_yield(queue: asyncio.Queue, process_func, out_pbar: tqdm):
         if chunk is None:
             break
         processed = await loop.run_in_executor(None, process_func, chunk)
-        out_pbar.update(len(processed))
-        yield processed
+        if processed:
+            out_pbar.update(len(processed))
+            yield processed
 
 
 async def http_producer(

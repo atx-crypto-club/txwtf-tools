@@ -47,6 +47,7 @@ jobs:
           .venv/bin/pip install pytest pytest-asyncio
 
       - name: Run live backup round-trip test
+        timeout-minutes: 20
         env:
           TXWTF_SFTP_HOST: star-01
           TXWTF_SFTP_USER: tfx
