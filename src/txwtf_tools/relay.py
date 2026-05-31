@@ -233,7 +233,7 @@ async def consume(
         raise ValueError(f"Unsupported scheme: {scheme}")
 
 
-async def process_and_yield(queue: asyncio.Queue, process_func, out_pbar: tqdm):
+async def process_and_yield(queue: asyncio.Queue, process_func, out_pbar: tqdm, finalize_func=None):
     """
     Async generator that pulls from queue, processes chunks (in executor if CPU-bound),
     and yields processed chunks for streaming output.
@@ -242,11 +242,19 @@ async def process_and_yield(queue: asyncio.Queue, process_func, out_pbar: tqdm):
     accumulated a full token yet) are silently skipped — this avoids sending a
     zero-length chunk in HTTP chunked transfer encoding, which would terminate
     the stream prematurely.
+
+    If *finalize_func* is provided it is called once after the last chunk to
+    flush any buffered state (e.g. a zlib compressor's trailing bytes).
     """
     loop = asyncio.get_running_loop()
     while True:
         chunk = await queue.get()
         if chunk is None:
+            if finalize_func:
+                final = await loop.run_in_executor(None, finalize_func)
+                if final:
+                    out_pbar.update(len(final))
+                    yield final
             break
         processed = await loop.run_in_executor(None, process_func, chunk)
         if processed:
@@ -261,6 +269,7 @@ async def http_producer(
     headers: dict,
     out_pbar: tqdm,
     config: dict | None,
+    finalize_func=None,
 ):
     """Streams processed data to HTTP/HTTPS POST request."""
     is_https = post_url.startswith("https://")
@@ -272,7 +281,7 @@ async def http_producer(
 
     async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
         async with session.post(
-            post_url, headers=headers, data=process_and_yield(queue, process_func, out_pbar)
+            post_url, headers=headers, data=process_and_yield(queue, process_func, out_pbar, finalize_func)
         ) as resp:
             if resp.status not in (200, 202):
                 raise ValueError(f"POST request failed with status {resp.status}")
@@ -285,6 +294,7 @@ async def sftp_producer(
     process_func,
     out_pbar: tqdm,
     config: dict | None,
+    finalize_func=None,
 ):
     """Streams processed data to SFTP file."""
     parsed = urlparse(post_url)
@@ -309,7 +319,7 @@ async def sftp_producer(
     async with asyncssh.connect(**connect_kwargs) as conn:
         async with conn.start_sftp_client() as sftp:
             async with await sftp.open(path, "wb") as f:
-                async for processed in process_and_yield(queue, process_func, out_pbar):
+                async for processed in process_and_yield(queue, process_func, out_pbar, finalize_func):
                     await f.write(processed)
 
 
@@ -318,13 +328,14 @@ async def file_producer(
     queue: asyncio.Queue,
     process_func,
     out_pbar: tqdm,
+    finalize_func=None,
 ):
     """Streams processed data to local file."""
     parsed = urlparse(post_url)
     path = parsed.path
 
     async with aiofiles.open(path, "wb") as f:
-        async for processed in process_and_yield(queue, process_func, out_pbar):
+        async for processed in process_and_yield(queue, process_func, out_pbar, finalize_func):
             await f.write(processed)
 
 
@@ -335,15 +346,16 @@ async def produce(
     headers: dict,
     out_pbar: tqdm,
     config: dict | None,
+    finalize_func=None,
 ):
     """General producer dispatcher based on URL scheme."""
     scheme = urlparse(post_url).scheme.lower()
     if scheme in ("http", "https"):
-        await http_producer(post_url, queue, process_func, headers, out_pbar, config)
+        await http_producer(post_url, queue, process_func, headers, out_pbar, config, finalize_func)
     elif scheme == "sftp":
-        await sftp_producer(post_url, queue, process_func, out_pbar, config)
+        await sftp_producer(post_url, queue, process_func, out_pbar, config, finalize_func)
     elif scheme == "file":
-        await file_producer(post_url, queue, process_func, out_pbar)
+        await file_producer(post_url, queue, process_func, out_pbar, finalize_func)
     else:
         raise ValueError(f"Unsupported scheme: {scheme}")
 
@@ -376,6 +388,7 @@ async def relay_stream(
     per_queue_maxsize: list[int] | None = None,
     rate_limit: float | None = None,
     get_process_func: Callable[[bytes], bytes] | None = None,
+    finalize_func: Callable[[], bytes] | None = None,
 ):
     """
     Main relay function.
@@ -385,14 +398,18 @@ async def relay_stream(
 
     *get_process_func* is applied on the **input** side — each chunk read from
     *get_url* is transformed before being placed into the per-destination queues.
-    Use this for decryption of an encrypted source.
+    Use this for decryption or decompression of the source stream.
 
     *process_func* is applied on the **output** side — each chunk pulled from a
     queue is transformed before being written to the destination.  Use this for
-    encryption of the outgoing stream.
+    encryption or compression of the outgoing stream.
 
-    Both may be combined (e.g. decrypt with one key on input, re-encrypt with a
-    different key on output).
+    *finalize_func* is called once after the last chunk on the output side to
+    flush any buffered state (e.g. a zlib compressor's trailing bytes or a
+    final encrypted token).  Its return value is appended to the output.
+
+    Both input and output transforms may be combined (e.g. decrypt with one key
+    on input, re-encrypt with a different key on output).
 
     Backpressure is handled via bounded asyncio queues (one per destination).
     Queue puts happen concurrently so a slow consumer cannot block faster ones.
@@ -444,7 +461,7 @@ async def relay_stream(
     consumer_task = asyncio.create_task(consume(get_url, queues, in_pbar, get_headers, chunk_size, get_config, rate_limiter, get_process_func))
 
     producer_tasks = [
-        asyncio.create_task(produce(post_url, queue, process_func, post_header, out_pbar, post_config))
+        asyncio.create_task(produce(post_url, queue, process_func, post_header, out_pbar, post_config, finalize_func))
         for post_url, queue, post_header, out_pbar, post_config in zip(
             post_urls, queues, post_headers, out_pbars, post_configs
         )

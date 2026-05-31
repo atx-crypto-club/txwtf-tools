@@ -87,6 +87,49 @@ def make_decrypt_func(passphrase: str):
 
 
 # ---------------------------------------------------------------------------
+# Compression / decompression helpers (gzip format)
+# ---------------------------------------------------------------------------
+
+def make_compress_func(level: int = 9):
+    """Return ``(compress_func, finalize_func)`` for gzip compression.
+
+    *compress_func* is a stateful per-chunk compressor.  It may return empty
+    bytes when zlib buffers internally — the relay skips empty results
+    automatically.
+
+    *finalize_func* must be called once after the last chunk to flush the
+    gzip trailer.  Pass it as ``finalize_func`` to :func:`relay_stream`.
+    """
+    compressor = zlib.compressobj(level, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+
+    def compress(chunk: bytes) -> bytes:
+        if not chunk:
+            return b""
+        return compressor.compress(chunk)
+
+    def finalize() -> bytes:
+        return compressor.flush(zlib.Z_FINISH)
+
+    return compress, finalize
+
+
+def make_decompress_func():
+    """Return a decompression function for gzip data.
+
+    Stateful — each call decompresses whatever is available from the
+    internal zlib buffer.
+    """
+    decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+
+    def decompress(chunk: bytes) -> bytes:
+        if not chunk:
+            return b""
+        return decompressor.decompress(chunk)
+
+    return decompress
+
+
+# ---------------------------------------------------------------------------
 # pylxd helpers — guarded behind try/except so the package works without pylxd
 # ---------------------------------------------------------------------------
 
@@ -355,14 +398,7 @@ def do_restore(
     if encrypt:
         funcs.append(make_decrypt_func(passphrase))
     if compress:
-        decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
-
-        def decompress_chunk(chunk: bytes) -> bytes:
-            if not chunk:
-                return b""
-            return decompressor.decompress(chunk)
-
-        funcs.append(decompress_chunk)
+        funcs.append(make_decompress_func())
 
     get_process_func = chain_functions(*funcs) if funcs else None
 

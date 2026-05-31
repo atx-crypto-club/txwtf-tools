@@ -51,6 +51,8 @@ def cli():
     "--encrypt-passphrase", default=None, hide_input=True,
     help="Passphrase to encrypt the output stream (length-prefixed Fernet).",
 )
+@click.option("--compress", is_flag=True, default=False, help="Gzip-compress the output stream.")
+@click.option("--decompress", is_flag=True, default=False, help="Gzip-decompress the input stream.")
 def relay(
     get_url,
     post_urls,
@@ -66,6 +68,8 @@ def relay(
     rate_limit,
     decrypt_passphrase,
     encrypt_passphrase,
+    compress,
+    decompress,
 ):
     """Relay a stream from GET_URL to one or more POST_URLS.
 
@@ -75,12 +79,51 @@ def relay(
 
     get_process_func = None
     process_func = None
-    if decrypt_passphrase or encrypt_passphrase:
-        from .backup import make_decrypt_func, make_encrypt_func
-        if decrypt_passphrase:
+    finalize_func = None
+
+    if decompress:
+        from .backup import make_decompress_func
+        get_process_func = make_decompress_func()
+
+    if decrypt_passphrase:
+        from .backup import make_decrypt_func
+        if get_process_func:
+            from .backup import chain_functions
+            get_process_func = chain_functions(get_process_func, make_decrypt_func(decrypt_passphrase))
+        else:
             get_process_func = make_decrypt_func(decrypt_passphrase)
-        if encrypt_passphrase:
-            process_func = make_encrypt_func(encrypt_passphrase)
+
+    if compress:
+        from .backup import make_compress_func
+        compress_func, finalize_func = make_compress_func()
+        process_func = compress_func
+
+    if encrypt_passphrase:
+        from .backup import make_encrypt_func
+        enc = make_encrypt_func(encrypt_passphrase)
+        if process_func:
+            from .backup import chain_functions
+            old_process = process_func
+            old_finalize = finalize_func
+
+            def chained_process(chunk: bytes) -> bytes:
+                compressed = old_process(chunk)
+                if compressed:
+                    return enc(compressed)
+                return b""
+
+            def chained_finalize() -> bytes:
+                parts = bytearray()
+                if old_finalize:
+                    flushed = old_finalize()
+                    if flushed:
+                        parts.extend(enc(flushed))
+                return bytes(parts)
+
+            process_func = chained_process
+            finalize_func = chained_finalize
+        else:
+            process_func = enc
 
     get_config = None
     if get_cert and get_key:
@@ -114,6 +157,7 @@ def relay(
         rate_limit=rate_limit,
         get_process_func=get_process_func,
         process_func=process_func,
+        finalize_func=finalize_func,
     )
 
 

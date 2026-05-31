@@ -195,6 +195,34 @@ class TestRelayFileToFile:
 
         assert dst.read_bytes() == data.upper().replace(b" ", b"-")
 
+    @pytest.mark.asyncio
+    async def test_with_finalize_func(self, tmp_dir):
+        """finalize_func flushes trailing data after last chunk."""
+        src = tmp_dir / "src.bin"
+        dst = tmp_dir / "dst.bin"
+        data = b"ABCDEFGH" * 1000
+        src.write_bytes(data)
+
+        from txwtf_tools.backup import make_compress_func, make_decompress_func
+
+        compress, finalize = make_compress_func()
+
+        await relay_stream(
+            get_url=f"file://{src}",
+            post_urls=[f"file://{dst}"],
+            process_func=compress,
+            finalize_func=finalize,
+            chunk_size=1024,
+            queue_maxsize=4,
+        )
+
+        compressed = dst.read_bytes()
+        assert len(compressed) < len(data)
+
+        # Verify it's valid gzip by decompressing
+        decompress = make_decompress_func()
+        assert decompress(compressed) == data
+
     def test_sync_wrapper(self, tmp_dir):
         src = tmp_dir / "src.bin"
         dst = tmp_dir / "dst.bin"
