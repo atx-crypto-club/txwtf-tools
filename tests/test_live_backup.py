@@ -471,7 +471,7 @@ class TestMultiVMBackupRoundTrip:
             target_url=sftp_base,
             cert_path=INCUS_CERT,
             key_path=INCUS_KEY,
-            ca_path=INCUS_CERT,  # self-signed — use client cert as CA stand-in
+            ca_path=None,  # self-signed cluster — skip TLS verification
             passphrase=PASSPHRASE,
             name_prefix=MULTI_PREFIX,
             compress=True,

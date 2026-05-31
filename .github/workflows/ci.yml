@@ -78,6 +78,14 @@ jobs:
             incus image delete "$img" 2>/dev/null || true
           done
           ssh -o StrictHostKeyChecking=no tfx@star-01 "rm -f /media/catx-easystore/txwtf-tools-tests/txwtf-ci-${RUN_ID}-backup.enc" 2>/dev/null || true
+          # Multi-VM test resources
+          for i in 0 1; do
+            c="txwtf-ci-${RUN_ID}-m-${i}"
+            incus delete "$c" --force 2>/dev/null || true
+            incus delete "${c}-restored" --force 2>/dev/null || true
+            incus image delete "default-${c}-backup" 2>/dev/null || true
+            ssh -o StrictHostKeyChecking=no tfx@star-01 "rm -f /media/catx-easystore/txwtf-tools-tests/default-${c}-backup.img.gz.enc" 2>/dev/null || true
+          done
           # Also try deleting the image by fingerprint (covers the case
           # where import succeeded but alias creation didn't).
           if [ -f .txwtf-ci-fingerprint ]; then

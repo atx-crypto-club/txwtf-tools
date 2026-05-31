@@ -151,7 +151,7 @@ def prepare_backup(
     source_endpoint: str,
     cert_path: str,
     key_path: str,
-    ca_path: str,
+    ca_path: str | None = None,
 ):
     """Snapshot the VM and publish it as an image. Returns (image, snapshot, alias)."""
     pylxd = _get_pylxd()
@@ -160,7 +160,7 @@ def prepare_backup(
         project=project,
         endpoint=source_endpoint,
         cert=(cert_path, key_path),
-        verify=ca_path,
+        verify=ca_path if ca_path else False,
     )
 
     try:
@@ -203,7 +203,7 @@ def list_instances(
     endpoint: str,
     cert_path: str,
     key_path: str,
-    ca_path: str,
+    ca_path: str | None = None,
     project: str = "default",
     vm_type: str | None = None,
     name_prefix: str | None = None,
@@ -225,7 +225,7 @@ def list_instances(
         project=project,
         endpoint=endpoint,
         cert=(cert_path, key_path),
-        verify=ca_path,
+        verify=ca_path if ca_path else False,
     )
 
     instances = client.instances.all()
@@ -334,7 +334,7 @@ def do_store(
     passphrase: str,
     cert_path: str,
     key_path: str,
-    ca_path: str,
+    ca_path: str | None = None,
     compress: bool = True,
     encrypt: bool = True,
     chunk_size: int = 1024 * 1024,
@@ -383,21 +383,24 @@ def do_store(
 
         export_url = f"{source_endpoint}/1.0/images/{image.fingerprint}/export"
 
+        input_kwargs = {
+            "chunk_size": chunk_size,
+            "cert_file": cert_path,
+            "key_file": key_path,
+            "http_kwargs": {
+                "ssl": True,
+                "headers": {"User-Agent": "txwtf-tools 0.1.0"},
+                "allow_redirects": True,
+            },
+        }
+        if ca_path:
+            input_kwargs["ca_file"] = ca_path
+
         pairs = [
             {
                 "input_uri": export_url,
                 "output_uris": [sftp_url],
-                "input_kwargs": {
-                    "chunk_size": chunk_size,
-                    "cert_file": cert_path,
-                    "key_file": key_path,
-                    "ca_file": ca_path,
-                    "http_kwargs": {
-                        "ssl": True,
-                        "headers": {"User-Agent": "txwtf-tools 0.1.0"},
-                        "allow_redirects": True,
-                    },
-                },
+                "input_kwargs": input_kwargs,
                 "output_kwargs_list": [
                     {
                         "max_queue_size": max_queue_size,
@@ -486,7 +489,7 @@ def do_store_all(
     target_url: str,
     cert_path: str,
     key_path: str,
-    ca_path: str,
+    ca_path: str | None,
     passphrase: str,
     project: str = "default",
     compress: bool = True,
