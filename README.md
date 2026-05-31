@@ -11,6 +11,7 @@ Stream relay and LXD/Incus backup migration tools — pipe data between HTTP(S),
 - **Rate limiting** — throttle input read rate to a target bytes/sec
 - **LXD/Incus Copy** — snapshot a VM, publish it as an image, and stream it directly to another cluster
 - **LXD/Incus Store** — compress + encrypt a VM image and stream it to SFTP storage
+- **LXD/Incus Store All** — batch backup all (or filtered) VMs from a cluster with nested progress bars
 - **LXD/Incus Restore** — read an encrypted backup from SFTP, decrypt, decompress, and import it back into a cluster
 - **No temp files** — everything streams end-to-end; no intermediate files touch disk
 
@@ -258,6 +259,45 @@ txwtf-tools lxd-restore \
   --cert client.crt --key client.key --no-verify
 ```
 
+### Batch backup all VMs
+
+Back up every VM (or a filtered subset) from a cluster in a single command. An outer progress bar tracks VM count while inner bars show per-VM streaming throughput.
+
+```bash
+# Back up all instances
+txwtf-tools lxd-store-all https://cluster:8443 \
+  sftp://user@backup-host/backups \
+  --cert client.crt --key client.key --ca ca.pem
+
+# Only running containers whose name starts with "web-"
+txwtf-tools lxd-store-all https://cluster:8443 \
+  sftp://user@backup-host/backups \
+  --cert client.crt --key client.key --ca ca.pem \
+  --type container --prefix web- --status Running
+
+# Exclude specific VMs, use a different project
+txwtf-tools lxd-store-all https://cluster:8443 \
+  sftp://user@backup-host/backups \
+  --cert client.crt --key client.key --ca ca.pem \
+  --project production --exclude temp-vm --exclude test-vm
+
+# Uncompressed, unencrypted
+txwtf-tools lxd-store-all https://cluster:8443 \
+  sftp://user@backup-host/backups \
+  --cert client.crt --key client.key --ca ca.pem \
+  --no-compress --no-encrypt
+```
+
+Filter options:
+- `--type virtual-machine` or `--type container` — filter by instance type
+- `--prefix web-` — only instances whose name starts with the given string
+- `--contains prod` — only instances whose name contains the substring
+- `--status Running` — only instances with this status (Running, Stopped, etc.)
+- `--exclude NAME` — skip specific instances (can be repeated)
+- `--project NAME` — LXD/Incus project (default: `default`)
+
+Each backup is stored at `<target_url>/<project>-<name>-backup.img[.gz][.enc]`.
+
 ---
 
 ## Python API
@@ -315,6 +355,38 @@ relay(
 | `get_process_func` | Input | Applied to each chunk after reading, before queuing. Use for decrypt / decompress. |
 | `process_func` | Output | Applied to each chunk after dequeuing, before writing. Use for encrypt / compress. |
 | `finalize_func` | Output | Called once after the last chunk to flush buffered state (e.g. zlib trailer). |
+
+## Environment variables
+
+All commonly reused options can be set via `TXWTF_*` environment variables, useful for CI/automation and cron jobs. CLI flags always override env vars.
+
+| Variable | Commands | Purpose |
+|----------|----------|---------|
+| `TXWTF_CERT` | `lxd-copy`, `lxd-store`, `lxd-restore`, `lxd-store-all` | Client certificate path |
+| `TXWTF_KEY` | `lxd-copy`, `lxd-store`, `lxd-restore`, `lxd-store-all` | Client key path |
+| `TXWTF_CA` | `lxd-copy`, `lxd-store`, `lxd-restore`, `lxd-store-all` | Cluster CA certificate |
+| `TXWTF_PASSPHRASE` | `lxd-store`, `lxd-restore`, `lxd-store-all` | Encryption/decryption passphrase (skips interactive prompt) |
+| `TXWTF_PROJECT` | `lxd-store-all` | LXD/Incus project name |
+| `TXWTF_RATE_LIMIT` | all commands | Max input read rate (bytes/sec) |
+| `TXWTF_TARGET_CA` | `lxd-copy` | Target cluster CA certificate |
+| `TXWTF_TARGET_PROJECT` | `lxd-copy` | Target cluster project name |
+| `TXWTF_GET_CERT`, `TXWTF_GET_KEY`, `TXWTF_GET_CA` | `relay` | Input-side TLS client certs |
+| `TXWTF_POST_CERT`, `TXWTF_POST_KEY`, `TXWTF_POST_CA` | `relay` | Output-side TLS client certs |
+| `TXWTF_ENCRYPT_PASSPHRASE` | `relay` | Output encryption passphrase |
+| `TXWTF_DECRYPT_PASSPHRASE` | `relay` | Input decryption passphrase |
+
+Example — automated nightly backup via cron:
+
+```bash
+export TXWTF_CERT=~/.config/incus/client.crt
+export TXWTF_KEY=~/.config/incus/client.key
+export TXWTF_CA=/etc/incus/ca.pem
+export TXWTF_PASSPHRASE="my-backup-secret"
+
+# No interactive prompts needed
+txwtf-tools lxd-store-all https://cluster:8443 \
+  sftp://backup-user@nas/backups/nightly
+```
 
 ## Testing
 
