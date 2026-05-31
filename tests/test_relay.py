@@ -158,6 +158,43 @@ class TestRelayFileToFile:
 
         assert dst.read_bytes() == data.upper()
 
+    @pytest.mark.asyncio
+    async def test_with_get_process_func(self, tmp_dir):
+        """Input-side transform via get_process_func."""
+        src = tmp_dir / "src.bin"
+        dst = tmp_dir / "dst.bin"
+        data = b"hello world " * 500
+        src.write_bytes(data)
+
+        await relay_stream(
+            get_url=f"file://{src}",
+            post_urls=[f"file://{dst}"],
+            get_process_func=lambda chunk: chunk.upper(),
+            chunk_size=1024,
+            queue_maxsize=4,
+        )
+
+        assert dst.read_bytes() == data.upper()
+
+    @pytest.mark.asyncio
+    async def test_get_and_post_process_funcs(self, tmp_dir):
+        """Both input-side and output-side transforms applied in sequence."""
+        src = tmp_dir / "src.bin"
+        dst = tmp_dir / "dst.bin"
+        data = b"hello world " * 500
+        src.write_bytes(data)
+
+        await relay_stream(
+            get_url=f"file://{src}",
+            post_urls=[f"file://{dst}"],
+            get_process_func=lambda chunk: chunk.upper(),
+            process_func=lambda chunk: chunk.replace(b" ", b"-"),
+            chunk_size=1024,
+            queue_maxsize=4,
+        )
+
+        assert dst.read_bytes() == data.upper().replace(b" ", b"-")
+
     def test_sync_wrapper(self, tmp_dir):
         src = tmp_dir / "src.bin"
         dst = tmp_dir / "dst.bin"

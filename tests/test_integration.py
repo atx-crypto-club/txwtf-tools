@@ -1177,12 +1177,15 @@ class TestRateLimitedRelay:
 
 
 class TestEncryptDecryptRoundTrip:
-    """Encrypt → file → decrypt round-trip using relay_stream with
-    length-prefixed Fernet tokens (same format as do_store / do_restore)."""
+    """Encrypt → file → decrypt round-trip using relay with
+    length-prefixed Fernet tokens (same format as do_store / do_restore).
+
+    Tests get_process_func (input-side transform) and process_func
+    (output-side transform) independently and together."""
 
     def test_encrypt_file_decrypt(self, integration_dir):
-        """Encrypt data to a file, then decrypt back — verifies the
-        make_encrypt_func / make_decrypt_func pipeline end-to-end."""
+        """Encrypt on output, then decrypt on input — verifies the
+        make_encrypt_func / make_decrypt_func pipeline via relay."""
         from txwtf_tools.backup import make_decrypt_func, make_encrypt_func
         from txwtf_tools.relay import relay
 
@@ -1194,7 +1197,7 @@ class TestEncryptDecryptRoundTrip:
 
         passphrase = "integration-test-key"
 
-        # Step 1: file → encrypt → file
+        # Step 1: file → encrypt (output-side) → file
         relay(
             get_url=f"file://{src}",
             post_urls=[f"file://{enc}"],
@@ -1207,81 +1210,61 @@ class TestEncryptDecryptRoundTrip:
         assert len(enc_data) > len(data), "Encrypted data should be larger"
         assert enc_data != data
 
-        # Step 2: file → decrypt → file
+        # Step 2: file → decrypt (input-side) → file
         relay(
             get_url=f"file://{enc}",
             post_urls=[f"file://{dst}"],
-            process_func=make_decrypt_func(passphrase),
+            get_process_func=make_decrypt_func(passphrase),
             chunk_size=8192,
             queue_maxsize=8,
         )
 
         assert dst.read_bytes() == data
 
-    def test_compress_encrypt_file_decrypt_decompress(self, integration_dir):
-        """Full compress+encrypt → file → decrypt+decompress round-trip
-        matching the do_store / do_restore pipeline.
-
-        The store direction uses manual compress+encrypt (matching do_store's
-        streamer-based approach with finalize_callback), while the restore
-        direction uses relay with chained decrypt+decompress (matching
-        do_restore).
-        """
-        import zlib
-
-        from txwtf_tools.backup import (
-            chain_functions,
-            make_decrypt_func,
-            make_encrypt_func,
-        )
+    def test_reencrypt_with_different_passphrases(self, integration_dir):
+        """Encrypt → re-encrypt with different key → decrypt — proves relay
+        can decrypt input and encrypt output simultaneously with independent
+        passphrases."""
+        from txwtf_tools.backup import make_decrypt_func, make_encrypt_func
         from txwtf_tools.relay import relay
 
         src = integration_dir / "plain.bin"
-        enc = integration_dir / "stored.bin"
-        dst = integration_dir / "restored.bin"
-        # Compressible data for a more realistic test
-        data = b"ABCDEFGH" * 10_000
+        enc_a = integration_dir / "encrypted_a.bin"
+        enc_b = integration_dir / "encrypted_b.bin"
+        dst = integration_dir / "decrypted.bin"
+        data = os.urandom(80_000)
         src.write_bytes(data)
 
-        passphrase = "compress-encrypt-test"
+        key_a = "first-passphrase"
+        key_b = "second-passphrase"
 
-        # Store path: compress then encrypt, with proper flush
-        # (mirrors do_store's streamer + finalize_callback approach)
-        compressor = zlib.compressobj(9, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
-        encrypt = make_encrypt_func(passphrase)
-        stored = bytearray()
-        chunk_size = 8192
-        with open(src, "rb") as f:
-            while True:
-                chunk = f.read(chunk_size)
-                if not chunk:
-                    break
-                compressed = compressor.compress(chunk)
-                if compressed:
-                    stored.extend(encrypt(compressed))
-        flushed = compressor.flush(zlib.Z_FINISH)
-        if flushed:
-            stored.extend(encrypt(flushed))
-        enc.write_bytes(bytes(stored))
-
-        assert len(stored) < len(data), "Compressed+encrypted should be smaller for repetitive data"
-
-        # Restore path: decrypt then decompress via relay
-        # (mirrors do_restore's relay-based approach)
-        decrypt = make_decrypt_func(passphrase)
-        decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
-
-        def decompress_chunk(chunk: bytes) -> bytes:
-            if not chunk:
-                return b""
-            return decompressor.decompress(chunk)
-
-        restore_func = chain_functions(decrypt, decompress_chunk)
-
+        # Step 1: file → encrypt with key_a (output-side) → file
         relay(
-            get_url=f"file://{enc}",
+            get_url=f"file://{src}",
+            post_urls=[f"file://{enc_a}"],
+            process_func=make_encrypt_func(key_a),
+            chunk_size=8192,
+            queue_maxsize=8,
+        )
+
+        # Step 2: decrypt key_a (input-side) + re-encrypt key_b (output-side)
+        relay(
+            get_url=f"file://{enc_a}",
+            post_urls=[f"file://{enc_b}"],
+            get_process_func=make_decrypt_func(key_a),
+            process_func=make_encrypt_func(key_b),
+            chunk_size=8192,
+            queue_maxsize=8,
+        )
+
+        # Verify enc_b is different from enc_a (different key)
+        assert enc_a.read_bytes() != enc_b.read_bytes()
+
+        # Step 3: decrypt key_b (input-side) → plaintext
+        relay(
+            get_url=f"file://{enc_b}",
             post_urls=[f"file://{dst}"],
-            process_func=restore_func,
+            get_process_func=make_decrypt_func(key_b),
             chunk_size=8192,
             queue_maxsize=8,
         )

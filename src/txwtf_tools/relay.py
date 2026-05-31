@@ -94,6 +94,7 @@ async def http_consumer(
     chunk_size: int,
     config: dict | None,
     rate_limiter: TokenBucketRateLimiter | None = None,
+    get_process_func: Callable[[bytes], bytes] | None = None,
 ):
     """Streams data from HTTP/HTTPS GET request and fans out chunks into queues."""
     is_https = get_url.startswith("https://")
@@ -103,6 +104,7 @@ async def http_consumer(
     timeout_dict = config.get("timeout", {"total": 300}) if config else {"total": 300}
     timeout = aiohttp.ClientTimeout(**timeout_dict)
 
+    loop = asyncio.get_running_loop()
     async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
         async with session.get(get_url, headers=headers) as resp:
             if resp.status not in (200, 202):
@@ -114,8 +116,12 @@ async def http_consumer(
             async for chunk in resp.content.iter_chunked(chunk_size):
                 if rate_limiter:
                     await rate_limiter.acquire(len(chunk))
-                await asyncio.gather(*(q.put(chunk) for q in queues))
                 pbar.update(len(chunk))
+                if get_process_func:
+                    chunk = await loop.run_in_executor(None, get_process_func, chunk)
+                    if not chunk:
+                        continue
+                await asyncio.gather(*(q.put(chunk) for q in queues))
 
             await asyncio.gather(*(q.put(None) for q in queues))
 
@@ -127,6 +133,7 @@ async def sftp_consumer(
     chunk_size: int,
     config: dict | None,
     rate_limiter: TokenBucketRateLimiter | None = None,
+    get_process_func: Callable[[bytes], bytes] | None = None,
 ):
     """Streams data from SFTP file and fans out chunks into queues."""
     parsed = urlparse(get_url)
@@ -148,6 +155,7 @@ async def sftp_consumer(
         connect_kwargs["password"] = parsed.password
     connect_kwargs.update(config)
 
+    loop = asyncio.get_running_loop()
     async with asyncssh.connect(**connect_kwargs) as conn:
         async with conn.start_sftp_client() as sftp:
             stat = await sftp.stat(path)
@@ -160,8 +168,12 @@ async def sftp_consumer(
                         break
                     if rate_limiter:
                         await rate_limiter.acquire(len(chunk))
-                    await asyncio.gather(*(q.put(chunk) for q in queues))
                     pbar.update(len(chunk))
+                    if get_process_func:
+                        chunk = await loop.run_in_executor(None, get_process_func, chunk)
+                        if not chunk:
+                            continue
+                    await asyncio.gather(*(q.put(chunk) for q in queues))
 
             await asyncio.gather(*(q.put(None) for q in queues))
 
@@ -172,6 +184,7 @@ async def file_consumer(
     pbar: tqdm,
     chunk_size: int,
     rate_limiter: TokenBucketRateLimiter | None = None,
+    get_process_func: Callable[[bytes], bytes] | None = None,
 ):
     """Streams data from local file and fans out chunks into queues."""
     parsed = urlparse(get_url)
@@ -180,6 +193,7 @@ async def file_consumer(
     content_length = os.path.getsize(path)
     pbar.total = content_length
 
+    loop = asyncio.get_running_loop()
     async with aiofiles.open(path, "rb") as f:
         while True:
             chunk = await f.read(chunk_size)
@@ -187,8 +201,12 @@ async def file_consumer(
                 break
             if rate_limiter:
                 await rate_limiter.acquire(len(chunk))
-            await asyncio.gather(*(q.put(chunk) for q in queues))
             pbar.update(len(chunk))
+            if get_process_func:
+                chunk = await loop.run_in_executor(None, get_process_func, chunk)
+                if not chunk:
+                    continue
+            await asyncio.gather(*(q.put(chunk) for q in queues))
 
     await asyncio.gather(*(q.put(None) for q in queues))
 
@@ -201,15 +219,16 @@ async def consume(
     chunk_size: int,
     config: dict | None,
     rate_limiter: TokenBucketRateLimiter | None = None,
+    get_process_func: Callable[[bytes], bytes] | None = None,
 ):
     """General consumer dispatcher based on URL scheme."""
     scheme = urlparse(get_url).scheme.lower()
     if scheme in ("http", "https"):
-        await http_consumer(get_url, queues, pbar, headers, chunk_size, config, rate_limiter)
+        await http_consumer(get_url, queues, pbar, headers, chunk_size, config, rate_limiter, get_process_func)
     elif scheme == "sftp":
-        await sftp_consumer(get_url, queues, pbar, chunk_size, config, rate_limiter)
+        await sftp_consumer(get_url, queues, pbar, chunk_size, config, rate_limiter, get_process_func)
     elif scheme == "file":
-        await file_consumer(get_url, queues, pbar, chunk_size, rate_limiter)
+        await file_consumer(get_url, queues, pbar, chunk_size, rate_limiter, get_process_func)
     else:
         raise ValueError(f"Unsupported scheme: {scheme}")
 
@@ -356,12 +375,24 @@ async def relay_stream(
     post_configs: list[dict | None] | None = None,
     per_queue_maxsize: list[int] | None = None,
     rate_limit: float | None = None,
+    get_process_func: Callable[[bytes], bytes] | None = None,
 ):
     """
     Main relay function.
 
     Reads from *get_url* (http/https/sftp/file), optionally transforms each chunk
     with *process_func*, and streams to every URL in *post_urls* concurrently.
+
+    *get_process_func* is applied on the **input** side — each chunk read from
+    *get_url* is transformed before being placed into the per-destination queues.
+    Use this for decryption of an encrypted source.
+
+    *process_func* is applied on the **output** side — each chunk pulled from a
+    queue is transformed before being written to the destination.  Use this for
+    encryption of the outgoing stream.
+
+    Both may be combined (e.g. decrypt with one key on input, re-encrypt with a
+    different key on output).
 
     Backpressure is handled via bounded asyncio queues (one per destination).
     Queue puts happen concurrently so a slow consumer cannot block faster ones.
@@ -410,7 +441,7 @@ async def relay_stream(
             for i in range(len(queues))
         ]
 
-    consumer_task = asyncio.create_task(consume(get_url, queues, in_pbar, get_headers, chunk_size, get_config, rate_limiter))
+    consumer_task = asyncio.create_task(consume(get_url, queues, in_pbar, get_headers, chunk_size, get_config, rate_limiter, get_process_func))
 
     producer_tasks = [
         asyncio.create_task(produce(post_url, queue, process_func, post_header, out_pbar, post_config))

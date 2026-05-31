@@ -348,7 +348,9 @@ def do_restore(
     """
     import_url = f"{target_endpoint}/1.0/images"
 
-    # Build process function: decrypt then decompress (reverse of store)
+    # Build input-side process function: decrypt then decompress (reverse of store).
+    # Applied on the input (SFTP read) side via get_process_func so the raw
+    # decrypted/decompressed bytes are streamed directly to the Incus API.
     funcs: list = []
     if encrypt:
         funcs.append(make_decrypt_func(passphrase))
@@ -362,7 +364,7 @@ def do_restore(
 
         funcs.append(decompress_chunk)
 
-    process_func = chain_functions(*funcs) if funcs else None
+    get_process_func = chain_functions(*funcs) if funcs else None
 
     ssl_config: dict = {
         "client_cert": cert_path,
@@ -387,8 +389,8 @@ def do_restore(
         "post_configs": [ssl_config],
     }
 
-    if process_func is not None:
-        relay_kwargs["process_func"] = process_func
+    if get_process_func is not None:
+        relay_kwargs["get_process_func"] = get_process_func
     if rate_limit:
         relay_kwargs["rate_limit"] = rate_limit
 

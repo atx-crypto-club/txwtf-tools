@@ -43,6 +43,14 @@ def cli():
     "--rate-limit", type=float, default=None,
     help="Max input read rate in bytes/sec (e.g. 1048576 for 1 MB/s). 0 = unlimited.",
 )
+@click.option(
+    "--decrypt-passphrase", default=None, hide_input=True,
+    help="Passphrase to decrypt the input stream (length-prefixed Fernet).",
+)
+@click.option(
+    "--encrypt-passphrase", default=None, hide_input=True,
+    help="Passphrase to encrypt the output stream (length-prefixed Fernet).",
+)
 def relay(
     get_url,
     post_urls,
@@ -56,12 +64,23 @@ def relay(
     post_key,
     post_ca,
     rate_limit,
+    decrypt_passphrase,
+    encrypt_passphrase,
 ):
     """Relay a stream from GET_URL to one or more POST_URLS.
 
     Supports http(s), sftp, and file:// schemes on both sides.
     """
     from .relay import relay as do_relay
+
+    get_process_func = None
+    process_func = None
+    if decrypt_passphrase or encrypt_passphrase:
+        from .backup import make_decrypt_func, make_encrypt_func
+        if decrypt_passphrase:
+            get_process_func = make_decrypt_func(decrypt_passphrase)
+        if encrypt_passphrase:
+            process_func = make_encrypt_func(encrypt_passphrase)
 
     get_config = None
     if get_cert and get_key:
@@ -93,6 +112,8 @@ def relay(
         get_config=get_config,
         post_configs=post_configs,
         rate_limit=rate_limit,
+        get_process_func=get_process_func,
+        process_func=process_func,
     )
 
 
