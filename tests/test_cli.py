@@ -17,7 +17,7 @@ class TestCliRelay:
         runner = CliRunner()
         result = runner.invoke(
             cli,
-            ["relay", f"file://{src}", f"file://{dst}", "--chunk-size", "1024"],
+            ["relay", src.as_uri(), dst.as_uri(), "--chunk-size", "1024"],
         )
         assert result.exit_code == 0, result.output
         assert dst.read_bytes() == data
@@ -34,9 +34,9 @@ class TestCliRelay:
             cli,
             [
                 "relay",
-                f"file://{src}",
-                f"file://{dst1}",
-                f"file://{dst2}",
+                src.as_uri(),
+                dst1.as_uri(),
+                dst2.as_uri(),
                 "--chunk-size",
                 "512",
             ],

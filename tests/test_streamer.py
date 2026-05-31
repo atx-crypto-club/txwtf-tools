@@ -37,7 +37,7 @@ class TestGetInputStreamSize:
         f = tmp_path / "test.bin"
         data = os.urandom(5000)
         f.write_bytes(data)
-        size = await get_input_stream_size(f"file://{f}")
+        size = await get_input_stream_size(f.as_uri())
         assert size == 5000
 
     @pytest.mark.asyncio
@@ -53,7 +53,7 @@ class TestGetInputStream:
         data = os.urandom(4096)
         f.write_bytes(data)
 
-        gen = await get_input_stream(f"file://{f}", chunk_size=1024)
+        gen = await get_input_stream(f.as_uri(), chunk_size=1024)
 
         chunks = []
         async for chunk in gen:
@@ -126,8 +126,8 @@ class TestProcessStream:
         src.write_bytes(data)
 
         await process_stream(
-            input_uri=f"file://{src}",
-            output_uris=[f"file://{dst}"],
+            input_uri=src.as_uri(),
+            output_uris=[dst.as_uri()],
             input_kwargs={"chunk_size": 2048},
         )
 
@@ -142,8 +142,8 @@ class TestProcessStream:
         src.write_bytes(data)
 
         await process_stream(
-            input_uri=f"file://{src}",
-            output_uris=[f"file://{dst1}", f"file://{dst2}"],
+            input_uri=src.as_uri(),
+            output_uris=[dst1.as_uri(), dst2.as_uri()],
             input_kwargs={"chunk_size": 1024},
         )
 
@@ -157,8 +157,8 @@ class TestProcessStream:
 
         with pytest.raises(ValueError, match="must match"):
             await process_stream(
-                input_uri=f"file://{src}",
-                output_uris=[f"file://{tmp_path}/a.bin"],
+                input_uri=src.as_uri(),
+                output_uris=[(tmp_path / "a.bin").as_uri()],
                 output_kwargs_list=[{}, {}],
             )
 
@@ -171,8 +171,8 @@ class TestProcessStream:
         streamer(
             [
                 {
-                    "input_uri": f"file://{src}",
-                    "output_uris": [f"file://{dst}"],
+                    "input_uri": src.as_uri(),
+                    "output_uris": [dst.as_uri()],
                     "input_kwargs": {"chunk_size": 1024},
                 }
             ]

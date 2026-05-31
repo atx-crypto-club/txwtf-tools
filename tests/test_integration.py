@@ -391,7 +391,7 @@ class TestMixedRelay:
             from txwtf_tools.relay import relay
 
             relay(
-                get_url=f"file://{src_file}",
+                get_url=src_file.as_uri(),
                 post_urls=["http://127.0.0.1:18100/upload"],
                 chunk_size=4096,
                 queue_maxsize=8,
@@ -424,7 +424,7 @@ class TestMixedRelay:
 
             relay(
                 get_url="http://127.0.0.1:18101/data",
-                post_urls=[f"file://{dst_file}"],
+                post_urls=[dst_file.as_uri()],
                 chunk_size=4096,
                 queue_maxsize=8,
                 get_config={"verify": False},
@@ -468,7 +468,7 @@ class TestMixedRelay:
             relay(
                 get_url="http://127.0.0.1:18102/data",
                 post_urls=[
-                    f"file://{dst_file}",
+                    dst_file.as_uri(),
                     "http://127.0.0.1:18103/upload",
                 ],
                 chunk_size=4096,
@@ -1164,8 +1164,8 @@ class TestRateLimitedRelay:
 
         t0 = time.monotonic()
         relay(
-            get_url=f"file://{src}",
-            post_urls=[f"file://{dst}"],
+            get_url=src.as_uri(),
+            post_urls=[dst.as_uri()],
             chunk_size=10_000,
             queue_maxsize=4,
             rate_limit=25_000,  # 25 KB/s → ~2s
@@ -1195,8 +1195,8 @@ class TestRelayTransforms:
         passphrase = "integration-test-key"
 
         relay(
-            get_url=f"file://{src}",
-            post_urls=[f"file://{enc}"],
+            get_url=src.as_uri(),
+            post_urls=[enc.as_uri()],
             process_func=make_encrypt_func(passphrase),
             chunk_size=8192,
             queue_maxsize=8,
@@ -1207,8 +1207,8 @@ class TestRelayTransforms:
         assert enc_data != data
 
         relay(
-            get_url=f"file://{enc}",
-            post_urls=[f"file://{dst}"],
+            get_url=enc.as_uri(),
+            post_urls=[dst.as_uri()],
             get_process_func=make_decrypt_func(passphrase),
             chunk_size=8192,
             queue_maxsize=8,
@@ -1229,8 +1229,8 @@ class TestRelayTransforms:
 
         compress, finalize = make_compress_func()
         relay(
-            get_url=f"file://{src}",
-            post_urls=[f"file://{gz}"],
+            get_url=src.as_uri(),
+            post_urls=[gz.as_uri()],
             process_func=compress,
             finalize_func=finalize,
             chunk_size=8192,
@@ -1241,8 +1241,8 @@ class TestRelayTransforms:
         assert len(gz_data) < len(data), "Compressed should be smaller for repetitive data"
 
         relay(
-            get_url=f"file://{gz}",
-            post_urls=[f"file://{dst}"],
+            get_url=gz.as_uri(),
+            post_urls=[dst.as_uri()],
             get_process_func=make_decompress_func(),
             chunk_size=8192,
             queue_maxsize=8,
@@ -1290,8 +1290,8 @@ class TestRelayTransforms:
             return b""
 
         relay(
-            get_url=f"file://{src}",
-            post_urls=[f"file://{stored}"],
+            get_url=src.as_uri(),
+            post_urls=[stored.as_uri()],
             process_func=store_process,
             finalize_func=store_finalize,
             chunk_size=8192,
@@ -1309,8 +1309,8 @@ class TestRelayTransforms:
         )
 
         relay(
-            get_url=f"file://{stored}",
-            post_urls=[f"file://{dst}"],
+            get_url=stored.as_uri(),
+            post_urls=[dst.as_uri()],
             get_process_func=restore_func,
             chunk_size=8192,
             queue_maxsize=8,
@@ -1336,16 +1336,16 @@ class TestRelayTransforms:
         key_b = "second-passphrase"
 
         relay(
-            get_url=f"file://{src}",
-            post_urls=[f"file://{enc_a}"],
+            get_url=src.as_uri(),
+            post_urls=[enc_a.as_uri()],
             process_func=make_encrypt_func(key_a),
             chunk_size=8192,
             queue_maxsize=8,
         )
 
         relay(
-            get_url=f"file://{enc_a}",
-            post_urls=[f"file://{enc_b}"],
+            get_url=enc_a.as_uri(),
+            post_urls=[enc_b.as_uri()],
             get_process_func=make_decrypt_func(key_a),
             process_func=make_encrypt_func(key_b),
             chunk_size=8192,
@@ -1355,8 +1355,8 @@ class TestRelayTransforms:
         assert enc_a.read_bytes() != enc_b.read_bytes()
 
         relay(
-            get_url=f"file://{enc_b}",
-            post_urls=[f"file://{dst}"],
+            get_url=enc_b.as_uri(),
+            post_urls=[dst.as_uri()],
             get_process_func=make_decrypt_func(key_b),
             chunk_size=8192,
             queue_maxsize=8,

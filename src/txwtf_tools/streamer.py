@@ -12,13 +12,14 @@ import os.path
 import ssl
 from typing import Any, AsyncGenerator, Callable, Optional
 from urllib.parse import ParseResult, urlparse, urlunparse
+from urllib.request import url2pathname
 
 import aiofiles
 import aiohttp
 import asyncssh
 from tqdm.asyncio import tqdm as async_tqdm
 
-from .relay import TokenBucketRateLimiter
+from .relay import TokenBucketRateLimiter, _path_from_file_uri
 
 CHUNK_SIZE = 1024 * 1024  # 1 MB
 MAX_QUEUE_SIZE = 128
@@ -99,7 +100,7 @@ async def get_input_stream_size(uri: str, **input_kwargs: Any) -> int:
             await conn.close()
 
     elif scheme == "file":
-        path = parse.path
+        path = _path_from_file_uri(uri)
         if not path:
             raise ValueError(f"Missing path in FILE URI: {uri}")
         return os.path.getsize(path)
@@ -194,7 +195,7 @@ async def get_input_stream(uri: str, **input_kwargs: Any) -> AsyncGenerator[byte
         return gen()
 
     elif scheme == "file":
-        path = parse.path
+        path = _path_from_file_uri(uri)
         if not path:
             raise ValueError(f"Missing path in FILE URI: {uri}")
         total_size = os.path.getsize(path)
@@ -345,8 +346,7 @@ async def process_stream(
         elif scheme == "file":
 
             async def file_task(uri=uri, kw=kw, gen=gen):
-                parse = urlparse(uri)
-                path = parse.path
+                path = _path_from_file_uri(uri)
                 if not path:
                     raise ValueError(f"Missing path in FILE URI: {uri}")
                 async with aiofiles.open(path, "wb") as f:

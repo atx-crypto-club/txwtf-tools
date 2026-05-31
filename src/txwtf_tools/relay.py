@@ -12,11 +12,21 @@ import ssl
 import time
 from typing import Callable
 from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import aiofiles
 import aiohttp
 import asyncssh
 from tqdm.asyncio import tqdm
+
+
+def _path_from_file_uri(uri: str) -> str:
+    """Extract a native filesystem path from a ``file://`` URI.
+
+    Handles Windows drive-letter URIs (``file:///C:/path``) correctly
+    by using :func:`urllib.request.url2pathname`.
+    """
+    return url2pathname(urlparse(uri).path)
 
 
 class TokenBucketRateLimiter:
@@ -187,8 +197,7 @@ async def file_consumer(
     get_process_func: Callable[[bytes], bytes] | None = None,
 ):
     """Streams data from local file and fans out chunks into queues."""
-    parsed = urlparse(get_url)
-    path = parsed.path
+    path = _path_from_file_uri(get_url)
 
     content_length = os.path.getsize(path)
     pbar.total = content_length
@@ -331,8 +340,7 @@ async def file_producer(
     finalize_func=None,
 ):
     """Streams processed data to local file."""
-    parsed = urlparse(post_url)
-    path = parsed.path
+    path = _path_from_file_uri(post_url)
 
     async with aiofiles.open(path, "wb") as f:
         async for processed in process_and_yield(queue, process_func, out_pbar, finalize_func):

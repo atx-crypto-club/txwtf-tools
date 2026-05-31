@@ -52,7 +52,7 @@ class TestFileConsumer:
         q = asyncio.Queue(maxsize=10)
         pbar = _FakePbar()
 
-        await file_consumer(f"file://{src}", [q], pbar, chunk_size=1024)
+        await file_consumer(src.as_uri(), [q], pbar, chunk_size=1024)
 
         chunks = []
         while not q.empty():
@@ -74,7 +74,7 @@ class TestFileConsumer:
         q2 = asyncio.Queue(maxsize=10)
         pbar = _FakePbar()
 
-        await file_consumer(f"file://{src}", [q1, q2], pbar, chunk_size=512)
+        await file_consumer(src.as_uri(), [q1, q2], pbar, chunk_size=512)
 
         def drain(q):
             parts = []
@@ -101,7 +101,7 @@ class TestFileProducer:
         await q.put(None)
 
         pbar = _FakePbar()
-        await file_producer(f"file://{dst}", q, lambda x: x, pbar)
+        await file_producer(dst.as_uri(), q, lambda x: x, pbar)
 
         assert dst.read_bytes() == data
 
@@ -115,8 +115,8 @@ class TestRelayFileToFile:
         src.write_bytes(data)
 
         await relay_stream(
-            get_url=f"file://{src}",
-            post_urls=[f"file://{dst}"],
+            get_url=src.as_uri(),
+            post_urls=[dst.as_uri()],
             chunk_size=2048,
             queue_maxsize=4,
         )
@@ -132,8 +132,8 @@ class TestRelayFileToFile:
         src.write_bytes(data)
 
         await relay_stream(
-            get_url=f"file://{src}",
-            post_urls=[f"file://{dst1}", f"file://{dst2}"],
+            get_url=src.as_uri(),
+            post_urls=[dst1.as_uri(), dst2.as_uri()],
             chunk_size=2048,
             queue_maxsize=4,
         )
@@ -149,8 +149,8 @@ class TestRelayFileToFile:
         src.write_bytes(data)
 
         await relay_stream(
-            get_url=f"file://{src}",
-            post_urls=[f"file://{dst}"],
+            get_url=src.as_uri(),
+            post_urls=[dst.as_uri()],
             process_func=lambda chunk: chunk.upper(),
             chunk_size=1024,
             queue_maxsize=4,
@@ -167,8 +167,8 @@ class TestRelayFileToFile:
         src.write_bytes(data)
 
         await relay_stream(
-            get_url=f"file://{src}",
-            post_urls=[f"file://{dst}"],
+            get_url=src.as_uri(),
+            post_urls=[dst.as_uri()],
             get_process_func=lambda chunk: chunk.upper(),
             chunk_size=1024,
             queue_maxsize=4,
@@ -185,8 +185,8 @@ class TestRelayFileToFile:
         src.write_bytes(data)
 
         await relay_stream(
-            get_url=f"file://{src}",
-            post_urls=[f"file://{dst}"],
+            get_url=src.as_uri(),
+            post_urls=[dst.as_uri()],
             get_process_func=lambda chunk: chunk.upper(),
             process_func=lambda chunk: chunk.replace(b" ", b"-"),
             chunk_size=1024,
@@ -208,8 +208,8 @@ class TestRelayFileToFile:
         compress, finalize = make_compress_func()
 
         await relay_stream(
-            get_url=f"file://{src}",
-            post_urls=[f"file://{dst}"],
+            get_url=src.as_uri(),
+            post_urls=[dst.as_uri()],
             process_func=compress,
             finalize_func=finalize,
             chunk_size=1024,
@@ -230,8 +230,8 @@ class TestRelayFileToFile:
         src.write_bytes(data)
 
         relay(
-            get_url=f"file://{src}",
-            post_urls=[f"file://{dst}"],
+            get_url=src.as_uri(),
+            post_urls=[dst.as_uri()],
             chunk_size=1024,
         )
 
@@ -246,8 +246,8 @@ class TestRelayValidation:
 
         with pytest.raises(ValueError, match="post_headers"):
             await relay_stream(
-                get_url=f"file://{src}",
-                post_urls=[f"file://{tmp_dir}/out.bin"],
+                get_url=src.as_uri(),
+                post_urls=[(tmp_dir / "out.bin").as_uri()],
                 post_headers=[{}, {}],  # 2 headers for 1 url
             )
 
@@ -258,8 +258,8 @@ class TestRelayValidation:
 
         with pytest.raises(ValueError, match="post_configs"):
             await relay_stream(
-                get_url=f"file://{src}",
-                post_urls=[f"file://{tmp_dir}/out.bin"],
+                get_url=src.as_uri(),
+                post_urls=[(tmp_dir / "out.bin").as_uri()],
                 post_configs=[None, None],  # 2 configs for 1 url
             )
 
@@ -271,7 +271,7 @@ class TestRelayValidation:
         with pytest.raises(ValueError, match="Unsupported scheme"):
             await relay_stream(
                 get_url=f"ftp://{src}",
-                post_urls=[f"file://{tmp_dir}/out.bin"],
+                post_urls=[(tmp_dir / "out.bin").as_uri()],
             )
 
 
@@ -343,8 +343,8 @@ class TestRateLimitedFileRelay:
         # Unlimited
         t0 = time.monotonic()
         await relay_stream(
-            get_url=f"file://{src}",
-            post_urls=[f"file://{dst_fast}"],
+            get_url=src.as_uri(),
+            post_urls=[dst_fast.as_uri()],
             chunk_size=10_000,
             queue_maxsize=4,
         )
@@ -353,8 +353,8 @@ class TestRateLimitedFileRelay:
         # Rate-limited to 25 KB/s — 50 KB should take ~2s
         t0 = time.monotonic()
         await relay_stream(
-            get_url=f"file://{src}",
-            post_urls=[f"file://{dst_slow}"],
+            get_url=src.as_uri(),
+            post_urls=[dst_slow.as_uri()],
             chunk_size=10_000,
             queue_maxsize=4,
             rate_limit=25_000,
@@ -379,8 +379,8 @@ class TestRateLimitedFileRelay:
 
         t0 = time.monotonic()
         await relay_stream(
-            get_url=f"file://{src}",
-            post_urls=[f"file://{dst}"],
+            get_url=src.as_uri(),
+            post_urls=[dst.as_uri()],
             chunk_size=2048,
             queue_maxsize=4,
             rate_limit=0,
@@ -399,8 +399,8 @@ class TestRateLimitedFileRelay:
 
         t0 = time.monotonic()
         await relay_stream(
-            get_url=f"file://{src}",
-            post_urls=[f"file://{dst}"],
+            get_url=src.as_uri(),
+            post_urls=[dst.as_uri()],
             process_func=lambda chunk: chunk.upper(),
             chunk_size=4096,
             queue_maxsize=4,
@@ -422,8 +422,8 @@ class TestRateLimitedFileRelay:
 
         t0 = time.monotonic()
         await relay_stream(
-            get_url=f"file://{src}",
-            post_urls=[f"file://{dst1}", f"file://{dst2}"],
+            get_url=src.as_uri(),
+            post_urls=[dst1.as_uri(), dst2.as_uri()],
             chunk_size=10_000,
             queue_maxsize=4,
             rate_limit=15_000,  # 15 KB/s → ~2s
