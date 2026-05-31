@@ -349,7 +349,6 @@ def do_store(
         return
 
     try:
-        ssl_verify = True if ca_path else False
         compressor = zlib.compressobj(9, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
         encryptor = Fernet(get_fixed_base64_from_utf8_string(passphrase))
 
@@ -389,7 +388,6 @@ def do_store(
             "cert_file": cert_path,
             "key_file": key_path,
             "http_kwargs": {
-                "ssl": ssl_verify,
                 "headers": {"User-Agent": "txwtf-tools 0.1.0"},
                 "allow_redirects": True,
             },

@@ -335,7 +335,7 @@ async def process_stream(
                 port = parse.port or kw.get("port", 22)
                 username = parse.username or kw.get("username")
                 password = parse.password or kw.get("password")
-                path = parse.path[1:]
+                path = parse.path
                 if not path:
                     raise ValueError(f"Missing path in SFTP URI: {uri}")
 
