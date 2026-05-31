@@ -358,7 +358,7 @@ def do_store(
         return
 
     try:
-        compressor = zlib.compressobj(9, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+        compressor = zlib.compressobj(1, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
         encryptor = Fernet(get_fixed_base64_from_utf8_string(passphrase))
 
         def pass_chunk(chunk: bytes) -> bytes:

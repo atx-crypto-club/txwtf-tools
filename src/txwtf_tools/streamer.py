@@ -246,6 +246,7 @@ async def consumer_gen(
     finalize_callback: Optional[Callable[[], Optional[bytes]]] = None,
 ) -> AsyncGenerator[bytes, None]:
     """Consume chunks from *q*, optionally transform them, and yield results."""
+    loop = asyncio.get_running_loop()
     with async_tqdm(
         total=total_size,
         unit="B",
@@ -258,13 +259,13 @@ async def consumer_gen(
             item = await q.get()
             if item is None:
                 if finalize_callback:
-                    final = finalize_callback()
+                    final = await loop.run_in_executor(None, finalize_callback)
                     if final is not None:
                         yield final
                 break
             pbar.update(len(item))
             if callback:
-                result = callback(item)
+                result = await loop.run_in_executor(None, callback, item)
                 if result is not None:
                     yield result
             else:
@@ -357,7 +358,11 @@ async def process_stream(
                         parent = os.path.dirname(path)
                         if parent:
                             await sftp.makedirs(parent, exist_ok=True)
-                        async with sftp.open(path, "wb") as file:
+                        async with sftp.open(
+                            path, "wb",
+                            block_size=kw.get("sftp_block_size", 262144),
+                            max_requests=kw.get("sftp_max_requests", 128),
+                        ) as file:
                             async for chunk in gen:
                                 await file.write(chunk)
 
