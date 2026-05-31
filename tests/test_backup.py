@@ -149,3 +149,119 @@ class TestMakeDecompressFunc:
     def test_empty_chunk_returns_empty(self):
         decompress = make_decompress_func()
         assert decompress(b"") == b""
+
+
+class TestListInstances:
+    """Tests for list_instances using mock pylxd client."""
+
+    def _make_instance(self, name, inst_type="virtual-machine", status="Running"):
+        class FakeInstance:
+            pass
+        inst = FakeInstance()
+        inst.name = name
+        inst.type = inst_type
+        inst.status = status
+        return inst
+
+    def _patch_list_instances(self, instances, monkeypatch):
+        """Patch _get_pylxd to return a fake client with the given instances."""
+        from unittest.mock import MagicMock
+        from txwtf_tools import backup
+
+        fake_pylxd = MagicMock()
+        fake_client = MagicMock()
+        fake_client.instances.all.return_value = instances
+        fake_pylxd.Client.return_value = fake_client
+        monkeypatch.setattr(backup, "_get_pylxd", lambda: fake_pylxd)
+
+    def test_returns_all_names(self, monkeypatch):
+        from txwtf_tools.backup import list_instances
+        instances = [self._make_instance("vm-a"), self._make_instance("vm-b")]
+        self._patch_list_instances(instances, monkeypatch)
+
+        result = list_instances("https://host:8443", "c.crt", "c.key", "ca.pem")
+        assert result == ["vm-a", "vm-b"]
+
+    def test_filter_by_type(self, monkeypatch):
+        from txwtf_tools.backup import list_instances
+        instances = [
+            self._make_instance("vm-1", inst_type="virtual-machine"),
+            self._make_instance("ct-1", inst_type="container"),
+        ]
+        self._patch_list_instances(instances, monkeypatch)
+
+        result = list_instances("https://h:8443", "c", "k", "ca", vm_type="container")
+        assert result == ["ct-1"]
+
+    def test_filter_by_prefix(self, monkeypatch):
+        from txwtf_tools.backup import list_instances
+        instances = [
+            self._make_instance("web-1"),
+            self._make_instance("db-1"),
+            self._make_instance("web-2"),
+        ]
+        self._patch_list_instances(instances, monkeypatch)
+
+        result = list_instances("https://h:8443", "c", "k", "ca", name_prefix="web-")
+        assert result == ["web-1", "web-2"]
+
+    def test_filter_by_contains(self, monkeypatch):
+        from txwtf_tools.backup import list_instances
+        instances = [
+            self._make_instance("prod-web-1"),
+            self._make_instance("staging-db-1"),
+            self._make_instance("prod-db-2"),
+        ]
+        self._patch_list_instances(instances, monkeypatch)
+
+        result = list_instances("https://h:8443", "c", "k", "ca", name_contains="db")
+        assert result == ["prod-db-2", "staging-db-1"]
+
+    def test_filter_by_status(self, monkeypatch):
+        from txwtf_tools.backup import list_instances
+        instances = [
+            self._make_instance("vm-1", status="Running"),
+            self._make_instance("vm-2", status="Stopped"),
+        ]
+        self._patch_list_instances(instances, monkeypatch)
+
+        result = list_instances("https://h:8443", "c", "k", "ca", status="Stopped")
+        assert result == ["vm-2"]
+
+    def test_exclude(self, monkeypatch):
+        from txwtf_tools.backup import list_instances
+        instances = [
+            self._make_instance("vm-a"),
+            self._make_instance("vm-b"),
+            self._make_instance("vm-c"),
+        ]
+        self._patch_list_instances(instances, monkeypatch)
+
+        result = list_instances("https://h:8443", "c", "k", "ca", exclude=["vm-b"])
+        assert result == ["vm-a", "vm-c"]
+
+    def test_combined_filters(self, monkeypatch):
+        from txwtf_tools.backup import list_instances
+        instances = [
+            self._make_instance("web-prod", inst_type="container", status="Running"),
+            self._make_instance("web-staging", inst_type="container", status="Stopped"),
+            self._make_instance("db-prod", inst_type="virtual-machine", status="Running"),
+            self._make_instance("web-test", inst_type="container", status="Running"),
+        ]
+        self._patch_list_instances(instances, monkeypatch)
+
+        result = list_instances(
+            "https://h:8443", "c", "k", "ca",
+            vm_type="container",
+            name_prefix="web-",
+            status="Running",
+            exclude=["web-test"],
+        )
+        assert result == ["web-prod"]
+
+    def test_empty_result(self, monkeypatch):
+        from txwtf_tools.backup import list_instances
+        self._patch_list_instances([], monkeypatch)
+
+        result = list_instances("https://h:8443", "c", "k", "ca")
+        assert result == []

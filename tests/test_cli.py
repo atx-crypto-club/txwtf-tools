@@ -63,6 +63,7 @@ class TestCliHelp:
         assert "lxd-copy" in result.output
         assert "lxd-store" in result.output
         assert "lxd-restore" in result.output
+        assert "lxd-store-all" in result.output
 
     def test_relay_help(self):
         runner = CliRunner()
@@ -88,3 +89,15 @@ class TestCliHelp:
         assert result.exit_code == 0
         assert "SFTP_URL" in result.output
         assert "TARGET_ENDPOINT" in result.output
+
+    def test_lxd_store_all_help(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["lxd-store-all", "--help"])
+        assert result.exit_code == 0
+        assert "SOURCE_ENDPOINT" in result.output
+        assert "TARGET_URL" in result.output
+        assert "--prefix" in result.output
+        assert "--contains" in result.output
+        assert "--exclude" in result.output
+        assert "--type" in result.output
+        assert "--status" in result.output

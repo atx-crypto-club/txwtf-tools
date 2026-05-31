@@ -198,6 +198,53 @@ def cleanup_backup(image, snapshot):
         snapshot.delete()
 
 
+def list_instances(
+    endpoint: str,
+    cert_path: str,
+    key_path: str,
+    ca_path: str,
+    project: str = "default",
+    vm_type: str | None = None,
+    name_prefix: str | None = None,
+    name_contains: str | None = None,
+    status: str | None = None,
+    exclude: list[str] | None = None,
+):
+    """Return a list of instance names from the LXD/Incus API, with optional filters.
+
+    *vm_type* can be ``"virtual-machine"`` or ``"container"`` to filter by type.
+    *name_prefix* keeps only instances whose name starts with the given string.
+    *name_contains* keeps only instances whose name contains the given substring.
+    *status* keeps only instances with a matching status (e.g. ``"Running"``, ``"Stopped"``).
+    *exclude* is a list of instance names to skip.
+    """
+    pylxd = _get_pylxd()
+
+    client = pylxd.Client(
+        project=project,
+        endpoint=endpoint,
+        cert=(cert_path, key_path),
+        verify=ca_path,
+    )
+
+    instances = client.instances.all()
+    names = []
+    for inst in instances:
+        if vm_type and inst.type != vm_type:
+            continue
+        if name_prefix and not inst.name.startswith(name_prefix):
+            continue
+        if name_contains and name_contains not in inst.name:
+            continue
+        if status and inst.status != status:
+            continue
+        if exclude and inst.name in exclude:
+            continue
+        names.append(inst.name)
+
+    return sorted(names)
+
+
 def do_copy(
     project: str,
     vm_name: str,
@@ -431,3 +478,93 @@ def do_restore(
         relay_kwargs["rate_limit"] = rate_limit
 
     relay(**relay_kwargs)
+
+
+def do_store_all(
+    endpoint: str,
+    target_url: str,
+    cert_path: str,
+    key_path: str,
+    ca_path: str,
+    passphrase: str,
+    project: str = "default",
+    compress: bool = True,
+    encrypt: bool = True,
+    vm_type: str | None = None,
+    name_prefix: str | None = None,
+    name_contains: str | None = None,
+    status: str | None = None,
+    exclude: list[str] | None = None,
+    chunk_size: int = 1024 * 1024,
+    max_queue_size: int = 512,
+    rate_limit: float | None = None,
+):
+    """Back up all matching VMs from an LXD/Incus endpoint to *target_url*.
+
+    Each VM image is stored at ``<target_url>/<project>-<vm_name>-backup.img``
+    (with ``.gz`` and/or ``.enc`` extensions based on *compress*/*encrypt*).
+
+    Returns a dict mapping VM names to ``"ok"`` or an error message.
+    """
+    names = list_instances(
+        endpoint=endpoint,
+        cert_path=cert_path,
+        key_path=key_path,
+        ca_path=ca_path,
+        project=project,
+        vm_type=vm_type,
+        name_prefix=name_prefix,
+        name_contains=name_contains,
+        status=status,
+        exclude=exclude,
+    )
+
+    if not names:
+        print("No matching instances found.")
+        return {}
+
+    print(f"Found {len(names)} instance(s) to back up: {', '.join(names)}")
+
+    # Build target filename suffix based on flags.
+    suffix = ".img"
+    if compress:
+        suffix += ".gz"
+    if encrypt:
+        suffix += ".enc"
+
+    # Normalise base URL — strip trailing slash.
+    base = target_url.rstrip("/")
+
+    results: dict[str, str] = {}
+    for i, name in enumerate(names, 1):
+        alias = f"{project}-{name}-backup"
+        dest = f"{base}/{alias}{suffix}"
+        print(f"\n[{i}/{len(names)}] Backing up '{name}' → {dest}")
+
+        try:
+            do_store(
+                project=project,
+                vm_name=name,
+                source_endpoint=endpoint,
+                sftp_url=dest,
+                passphrase=passphrase,
+                cert_path=cert_path,
+                key_path=key_path,
+                ca_path=ca_path,
+                compress=compress,
+                encrypt=encrypt,
+                chunk_size=chunk_size,
+                max_queue_size=max_queue_size,
+                rate_limit=rate_limit,
+            )
+            results[name] = "ok"
+            print(f"  ✓ '{name}' backed up successfully.")
+        except Exception as exc:
+            results[name] = str(exc)
+            print(f"  ✗ '{name}' failed: {exc}")
+
+    # Summary.
+    ok = sum(1 for v in results.values() if v == "ok")
+    failed = len(results) - ok
+    print(f"\nDone: {ok} succeeded, {failed} failed out of {len(results)} total.")
+    return results

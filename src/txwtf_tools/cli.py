@@ -344,3 +344,116 @@ def lxd_restore(
         max_queue_size=queue_maxsize,
         rate_limit=rate_limit,
     )
+
+
+# ---------------------------------------------------------------------------
+# lxd-store-all command
+# ---------------------------------------------------------------------------
+
+@cli.command("lxd-store-all")
+@click.argument("source_endpoint")
+@click.argument("target_url")
+@click.option(
+    "--passphrase",
+    prompt=True,
+    hide_input=True,
+    confirmation_prompt=True,
+    help="Passphrase for symmetric encryption.",
+)
+@click.option("--cert", required=True, type=click.Path(exists=True), help="Client certificate path.")
+@click.option("--key", required=True, type=click.Path(exists=True), help="Client key path.")
+@click.option("--ca", required=True, type=click.Path(exists=True), help="Cluster CA cert.")
+@click.option("--project", default="default", show_default=True, help="LXD/Incus project name.")
+@click.option("--no-compress", is_flag=True, default=False, help="Disable compression.")
+@click.option("--no-encrypt", is_flag=True, default=False, help="Disable encryption.")
+@click.option(
+    "--type",
+    "vm_type",
+    type=click.Choice(["virtual-machine", "container"], case_sensitive=False),
+    default=None,
+    help="Filter by instance type.",
+)
+@click.option("--prefix", default=None, help="Only back up instances whose name starts with this string.")
+@click.option("--contains", default=None, help="Only back up instances whose name contains this substring.")
+@click.option(
+    "--status",
+    default=None,
+    help="Only back up instances with this status (e.g. Running, Stopped).",
+)
+@click.option(
+    "--exclude",
+    multiple=True,
+    help="Instance name(s) to skip (can be repeated).",
+)
+@click.option("--chunk-size", default=1024 * 1024, show_default=True, help="Chunk size in bytes.")
+@click.option("--queue-maxsize", default=512, show_default=True, help="Max queue depth.")
+@click.option(
+    "--rate-limit", type=float, default=None,
+    help="Max input read rate in bytes/sec (e.g. 1048576 for 1 MB/s). 0 = unlimited.",
+)
+def lxd_store_all(
+    source_endpoint,
+    target_url,
+    passphrase,
+    cert,
+    key,
+    ca,
+    project,
+    no_compress,
+    no_encrypt,
+    vm_type,
+    prefix,
+    contains,
+    status,
+    exclude,
+    chunk_size,
+    queue_maxsize,
+    rate_limit,
+):
+    """Back up all matching VMs from SOURCE_ENDPOINT to TARGET_URL.
+
+    Each VM is snapshotted, published as an image, compressed, encrypted,
+    and streamed to TARGET_URL/<project>-<vm_name>-backup.img[.gz][.enc].
+
+    Use the filter options to select which instances to back up.
+
+    \b
+    Examples:
+      # Back up all VMs
+      txwtf-tools lxd-store-all https://cluster:8443 sftp://user@host/backups \\
+        --cert client.crt --key client.key --ca ca.pem
+
+      # Only running containers with name starting with "web-"
+      txwtf-tools lxd-store-all https://cluster:8443 sftp://user@host/backups \\
+        --cert client.crt --key client.key --ca ca.pem \\
+        --type container --prefix web- --status Running
+
+      # Exclude specific VMs
+      txwtf-tools lxd-store-all https://cluster:8443 sftp://user@host/backups \\
+        --cert client.crt --key client.key --ca ca.pem \\
+        --exclude temp-vm --exclude test-vm
+    """
+    from .backup import do_store_all
+
+    results = do_store_all(
+        endpoint=source_endpoint,
+        target_url=target_url,
+        cert_path=cert,
+        key_path=key,
+        ca_path=ca,
+        passphrase=passphrase,
+        project=project,
+        compress=not no_compress,
+        encrypt=not no_encrypt,
+        vm_type=vm_type,
+        name_prefix=prefix,
+        name_contains=contains,
+        status=status,
+        exclude=list(exclude) if exclude else None,
+        chunk_size=chunk_size,
+        max_queue_size=queue_maxsize,
+        rate_limit=rate_limit,
+    )
+
+    failed = sum(1 for v in results.values() if v != "ok")
+    raise SystemExit(1 if failed else 0)
