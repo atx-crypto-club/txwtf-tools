@@ -13,6 +13,7 @@ Stream relay and LXD/Incus backup migration tools — pipe data between HTTP(S),
 - **LXD/Incus Store** — compress + encrypt a VM image and stream it to SFTP storage
 - **LXD/Incus Store All** — batch backup all (or filtered) VMs from a cluster with nested progress bars
 - **LXD/Incus Restore** — read an encrypted backup from SFTP, decrypt, decompress, and import it back into a cluster
+- **LXD/Incus Restore All** — batch restore named VMs from SFTP backups with nested progress bars
 - **No temp files** — everything streams end-to-end; no intermediate files touch disk
 
 ## Installation
@@ -298,6 +299,58 @@ Filter options:
 
 Each backup is stored at `<target_url>/<project>-<name>-backup.img[.gz][.enc]`.
 
+### Batch restore all VMs
+
+Restore multiple VMs from SFTP backups in a single command — the inverse of `lxd-store-all`. Pass the VM names as positional arguments; backup filenames are derived using the same naming convention.
+
+```bash
+# Restore two VMs
+txwtf-tools lxd-restore-all sftp://user@backup-host/backups \
+  https://cluster:8443 \
+  vm-a vm-b \
+  --cert client.crt --key client.key
+
+# Restore with a specific project and TLS verification disabled
+txwtf-tools lxd-restore-all sftp://user@backup-host/backups \
+  https://cluster:8443 \
+  web-1 web-2 db-1 \
+  --cert client.crt --key client.key \
+  --project production --no-verify
+
+# Restore uncompressed, unencrypted backups
+txwtf-tools lxd-restore-all sftp://user@backup-host/backups \
+  https://cluster:8443 \
+  vm-a vm-b \
+  --cert client.crt --key client.key \
+  --no-decrypt --no-decompress
+```
+
+Options:
+- `--project NAME` — project name used when the backups were created (default: `default`)
+- `--no-decrypt` — input backups are not encrypted
+- `--no-decompress` — input backups are not compressed
+- `--ca ca.pem` — verify the target cluster's TLS cert
+- `--no-verify` — skip TLS verification
+- `--rate-limit BYTES` — throttle input read rate
+
+Each backup is expected at `<source_url>/<project>-<name>-backup.img[.gz][.enc]`.
+
+### Batch backup and restore round-trip
+
+```bash
+# Back up all containers matching a prefix
+txwtf-tools lxd-store-all https://cluster:8443 \
+  sftp://user@backup-host/backups \
+  --cert client.crt --key client.key --ca ca.pem \
+  --prefix web-
+
+# Restore them (on same or different cluster)
+txwtf-tools lxd-restore-all sftp://user@backup-host/backups \
+  https://cluster:8443 \
+  web-1 web-2 web-3 \
+  --cert client.crt --key client.key --no-verify
+```
+
 ---
 
 ## Python API
@@ -362,11 +415,11 @@ All commonly reused options can be set via `TXWTF_*` environment variables, usef
 
 | Variable | Commands | Purpose |
 |----------|----------|---------|
-| `TXWTF_CERT` | `lxd-copy`, `lxd-store`, `lxd-restore`, `lxd-store-all` | Client certificate path |
-| `TXWTF_KEY` | `lxd-copy`, `lxd-store`, `lxd-restore`, `lxd-store-all` | Client key path |
-| `TXWTF_CA` | `lxd-copy`, `lxd-store`, `lxd-restore`, `lxd-store-all` | Cluster CA certificate |
-| `TXWTF_PASSPHRASE` | `lxd-store`, `lxd-restore`, `lxd-store-all` | Encryption/decryption passphrase (skips interactive prompt) |
-| `TXWTF_PROJECT` | `lxd-store-all` | LXD/Incus project name |
+| `TXWTF_CERT` | `lxd-copy`, `lxd-store`, `lxd-restore`, `lxd-store-all`, `lxd-restore-all` | Client certificate path |
+| `TXWTF_KEY` | `lxd-copy`, `lxd-store`, `lxd-restore`, `lxd-store-all`, `lxd-restore-all` | Client key path |
+| `TXWTF_CA` | `lxd-copy`, `lxd-store`, `lxd-restore`, `lxd-store-all`, `lxd-restore-all` | Cluster CA certificate |
+| `TXWTF_PASSPHRASE` | `lxd-store`, `lxd-restore`, `lxd-store-all`, `lxd-restore-all` | Encryption/decryption passphrase (skips interactive prompt) |
+| `TXWTF_PROJECT` | `lxd-store-all`, `lxd-restore-all` | LXD/Incus project name |
 | `TXWTF_RATE_LIMIT` | all commands | Max input read rate (bytes/sec) |
 | `TXWTF_TARGET_CA` | `lxd-copy` | Target cluster CA certificate |
 | `TXWTF_TARGET_PROJECT` | `lxd-copy` | Target cluster project name |
