@@ -22,34 +22,43 @@ def cli():
 @click.option("--queue-maxsize", default=128, show_default=True, help="Max queue depth per output.")
 @click.option("--monitor/--no-monitor", default=False, help="Show queue fill-level bars.")
 @click.option(
-    "--get-cert", type=click.Path(exists=True), default=None, help="Client cert for input (HTTPS)."
+    "--get-cert", type=click.Path(exists=True), default=None,
+    envvar="TXWTF_GET_CERT", help="Client cert for input (HTTPS).  [env: TXWTF_GET_CERT]"
 )
 @click.option(
-    "--get-key", type=click.Path(exists=True), default=None, help="Client key for input (HTTPS)."
+    "--get-key", type=click.Path(exists=True), default=None,
+    envvar="TXWTF_GET_KEY", help="Client key for input (HTTPS).  [env: TXWTF_GET_KEY]"
 )
 @click.option(
-    "--get-ca", type=click.Path(exists=True), default=None, help="CA cert for input (HTTPS)."
+    "--get-ca", type=click.Path(exists=True), default=None,
+    envvar="TXWTF_GET_CA", help="CA cert for input (HTTPS).  [env: TXWTF_GET_CA]"
 )
 @click.option(
-    "--post-cert", type=click.Path(exists=True), default=None, help="Client cert for output (HTTPS)."
+    "--post-cert", type=click.Path(exists=True), default=None,
+    envvar="TXWTF_POST_CERT", help="Client cert for output (HTTPS).  [env: TXWTF_POST_CERT]"
 )
 @click.option(
-    "--post-key", type=click.Path(exists=True), default=None, help="Client key for output (HTTPS)."
+    "--post-key", type=click.Path(exists=True), default=None,
+    envvar="TXWTF_POST_KEY", help="Client key for output (HTTPS).  [env: TXWTF_POST_KEY]"
 )
 @click.option(
-    "--post-ca", type=click.Path(exists=True), default=None, help="CA cert for output (HTTPS)."
+    "--post-ca", type=click.Path(exists=True), default=None,
+    envvar="TXWTF_POST_CA", help="CA cert for output (HTTPS).  [env: TXWTF_POST_CA]"
 )
 @click.option(
     "--rate-limit", type=float, default=None,
-    help="Max input read rate in bytes/sec (e.g. 1048576 for 1 MB/s). 0 = unlimited.",
+    envvar="TXWTF_RATE_LIMIT",
+    help="Max input read rate in bytes/sec (e.g. 1048576 for 1 MB/s). 0 = unlimited.  [env: TXWTF_RATE_LIMIT]",
 )
 @click.option(
     "--decrypt-passphrase", default=None, hide_input=True,
-    help="Passphrase to decrypt the input stream (length-prefixed Fernet).",
+    envvar="TXWTF_DECRYPT_PASSPHRASE",
+    help="Passphrase to decrypt the input stream (length-prefixed Fernet).  [env: TXWTF_DECRYPT_PASSPHRASE]",
 )
 @click.option(
     "--encrypt-passphrase", default=None, hide_input=True,
-    help="Passphrase to encrypt the output stream (length-prefixed Fernet).",
+    envvar="TXWTF_ENCRYPT_PASSPHRASE",
+    help="Passphrase to encrypt the output stream (length-prefixed Fernet).  [env: TXWTF_ENCRYPT_PASSPHRASE]",
 )
 @click.option("--compress", is_flag=True, default=False, help="Gzip-compress the output stream.")
 @click.option("--decompress", is_flag=True, default=False, help="Gzip-decompress the input stream.")
@@ -170,16 +179,22 @@ def relay(
 @click.argument("vm_name")
 @click.argument("source_endpoint")
 @click.argument("target_endpoint")
-@click.option("--cert", required=True, type=click.Path(exists=True), help="Client certificate path.")
-@click.option("--key", required=True, type=click.Path(exists=True), help="Client key path.")
-@click.option("--ca", required=True, type=click.Path(exists=True), help="Source cluster CA cert.")
-@click.option("--target-ca", required=True, type=click.Path(exists=True), help="Target cluster CA cert.")
-@click.option("--target-project", required=True, help="Project name on the target cluster.")
+@click.option("--cert", required=True, type=click.Path(exists=True),
+    envvar="TXWTF_CERT", help="Client certificate path.  [env: TXWTF_CERT]")
+@click.option("--key", required=True, type=click.Path(exists=True),
+    envvar="TXWTF_KEY", help="Client key path.  [env: TXWTF_KEY]")
+@click.option("--ca", required=True, type=click.Path(exists=True),
+    envvar="TXWTF_CA", help="Source cluster CA cert.  [env: TXWTF_CA]")
+@click.option("--target-ca", required=True, type=click.Path(exists=True),
+    envvar="TXWTF_TARGET_CA", help="Target cluster CA cert.  [env: TXWTF_TARGET_CA]")
+@click.option("--target-project", required=True,
+    envvar="TXWTF_TARGET_PROJECT", help="Project name on the target cluster.  [env: TXWTF_TARGET_PROJECT]")
 @click.option("--chunk-size", default=1024 * 1024, show_default=True, help="Chunk size in bytes.")
 @click.option("--queue-maxsize", default=128, show_default=True, help="Max queue depth.")
 @click.option(
     "--rate-limit", type=float, default=None,
-    help="Max input read rate in bytes/sec (e.g. 1048576 for 1 MB/s). 0 = unlimited.",
+    envvar="TXWTF_RATE_LIMIT",
+    help="Max input read rate in bytes/sec (e.g. 1048576 for 1 MB/s). 0 = unlimited.  [env: TXWTF_RATE_LIMIT]",
 )
 def lxd_copy(
     project,
@@ -232,18 +247,23 @@ def lxd_copy(
     prompt=True,
     hide_input=True,
     confirmation_prompt=True,
-    help="Passphrase for symmetric encryption.",
+    envvar="TXWTF_PASSPHRASE",
+    help="Passphrase for symmetric encryption.  [env: TXWTF_PASSPHRASE]",
 )
-@click.option("--cert", required=True, type=click.Path(exists=True), help="Client certificate path.")
-@click.option("--key", required=True, type=click.Path(exists=True), help="Client key path.")
-@click.option("--ca", required=True, type=click.Path(exists=True), help="Cluster CA cert.")
+@click.option("--cert", required=True, type=click.Path(exists=True),
+    envvar="TXWTF_CERT", help="Client certificate path.  [env: TXWTF_CERT]")
+@click.option("--key", required=True, type=click.Path(exists=True),
+    envvar="TXWTF_KEY", help="Client key path.  [env: TXWTF_KEY]")
+@click.option("--ca", required=True, type=click.Path(exists=True),
+    envvar="TXWTF_CA", help="Cluster CA cert.  [env: TXWTF_CA]")
 @click.option("--no-compress", is_flag=True, default=False, help="Disable compression.")
 @click.option("--no-encrypt", is_flag=True, default=False, help="Disable encryption.")
 @click.option("--chunk-size", default=1024 * 1024, show_default=True, help="Chunk size in bytes.")
 @click.option("--queue-maxsize", default=512, show_default=True, help="Max queue depth.")
 @click.option(
     "--rate-limit", type=float, default=None,
-    help="Max input read rate in bytes/sec (e.g. 1048576 for 1 MB/s). 0 = unlimited.",
+    envvar="TXWTF_RATE_LIMIT",
+    help="Max input read rate in bytes/sec (e.g. 1048576 for 1 MB/s). 0 = unlimited.  [env: TXWTF_RATE_LIMIT]",
 )
 def lxd_store(
     project,
@@ -294,11 +314,15 @@ def lxd_store(
     "--passphrase",
     prompt=True,
     hide_input=True,
-    help="Passphrase for symmetric decryption.",
+    envvar="TXWTF_PASSPHRASE",
+    help="Passphrase for symmetric decryption.  [env: TXWTF_PASSPHRASE]",
 )
-@click.option("--cert", required=True, type=click.Path(exists=True), help="Client certificate path.")
-@click.option("--key", required=True, type=click.Path(exists=True), help="Client key path.")
-@click.option("--ca", type=click.Path(exists=True), default=None, help="Target cluster CA cert.")
+@click.option("--cert", required=True, type=click.Path(exists=True),
+    envvar="TXWTF_CERT", help="Client certificate path.  [env: TXWTF_CERT]")
+@click.option("--key", required=True, type=click.Path(exists=True),
+    envvar="TXWTF_KEY", help="Client key path.  [env: TXWTF_KEY]")
+@click.option("--ca", type=click.Path(exists=True), default=None,
+    envvar="TXWTF_CA", help="Target cluster CA cert.  [env: TXWTF_CA]")
 @click.option("--no-verify", is_flag=True, default=False, help="Disable TLS verification for target.")
 @click.option("--no-decompress", is_flag=True, default=False, help="Disable decompression.")
 @click.option("--no-decrypt", is_flag=True, default=False, help="Disable decryption.")
@@ -306,7 +330,8 @@ def lxd_store(
 @click.option("--queue-maxsize", default=20, show_default=True, help="Max queue depth.")
 @click.option(
     "--rate-limit", type=float, default=None,
-    help="Max input read rate in bytes/sec (e.g. 1048576 for 1 MB/s). 0 = unlimited.",
+    envvar="TXWTF_RATE_LIMIT",
+    help="Max input read rate in bytes/sec (e.g. 1048576 for 1 MB/s). 0 = unlimited.  [env: TXWTF_RATE_LIMIT]",
 )
 def lxd_restore(
     sftp_url,
@@ -358,12 +383,17 @@ def lxd_restore(
     prompt=True,
     hide_input=True,
     confirmation_prompt=True,
-    help="Passphrase for symmetric encryption.",
+    envvar="TXWTF_PASSPHRASE",
+    help="Passphrase for symmetric encryption.  [env: TXWTF_PASSPHRASE]",
 )
-@click.option("--cert", required=True, type=click.Path(exists=True), help="Client certificate path.")
-@click.option("--key", required=True, type=click.Path(exists=True), help="Client key path.")
-@click.option("--ca", required=True, type=click.Path(exists=True), help="Cluster CA cert.")
-@click.option("--project", default="default", show_default=True, help="LXD/Incus project name.")
+@click.option("--cert", required=True, type=click.Path(exists=True),
+    envvar="TXWTF_CERT", help="Client certificate path.  [env: TXWTF_CERT]")
+@click.option("--key", required=True, type=click.Path(exists=True),
+    envvar="TXWTF_KEY", help="Client key path.  [env: TXWTF_KEY]")
+@click.option("--ca", required=True, type=click.Path(exists=True),
+    envvar="TXWTF_CA", help="Cluster CA cert.  [env: TXWTF_CA]")
+@click.option("--project", default="default", show_default=True,
+    envvar="TXWTF_PROJECT", help="LXD/Incus project name.  [env: TXWTF_PROJECT]")
 @click.option("--no-compress", is_flag=True, default=False, help="Disable compression.")
 @click.option("--no-encrypt", is_flag=True, default=False, help="Disable encryption.")
 @click.option(
@@ -389,7 +419,8 @@ def lxd_restore(
 @click.option("--queue-maxsize", default=512, show_default=True, help="Max queue depth.")
 @click.option(
     "--rate-limit", type=float, default=None,
-    help="Max input read rate in bytes/sec (e.g. 1048576 for 1 MB/s). 0 = unlimited.",
+    envvar="TXWTF_RATE_LIMIT",
+    help="Max input read rate in bytes/sec (e.g. 1048576 for 1 MB/s). 0 = unlimited.  [env: TXWTF_RATE_LIMIT]",
 )
 def lxd_store_all(
     source_endpoint,
