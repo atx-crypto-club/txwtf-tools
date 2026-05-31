@@ -32,14 +32,13 @@ Env vars (all optional, with sane defaults):
 
 import asyncio
 import os
-import struct
 import subprocess
 import time
 import uuid
 
 import pytest
 
-from txwtf_tools.backup import get_fixed_base64_from_utf8_string
+from txwtf_tools.backup import do_restore, make_encrypt_func
 from txwtf_tools.relay import relay_stream
 
 # ---------------------------------------------------------------------------
@@ -161,46 +160,13 @@ def _incus_api_ssl_config() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Encryption / decryption helpers (length-prefixed Fernet tokens)
+# Encryption helper — uses the public API from backup.py
 # ---------------------------------------------------------------------------
 #
-# Fernet tokens for a 512 KB plaintext chunk are ~699 KB.  relay_stream reads
-# from SFTP in fixed-size chunks that will NOT align with token boundaries, so
-# we length-prefix every encrypted token (4-byte big-endian) on write and use a
-# stateful accumulator on read.
-
-def _make_encrypt_func(passphrase: str):
-    """Encrypt and prepend a 4-byte length header to each Fernet token."""
-    from cryptography.fernet import Fernet
-    key = get_fixed_base64_from_utf8_string(passphrase)
-    enc = Fernet(key)
-    def encrypt(chunk: bytes) -> bytes:
-        token = enc.encrypt(chunk)
-        return struct.pack(">I", len(token)) + token
-    return encrypt
-
-
-def _make_decrypt_func(passphrase: str):
-    """Return a *stateful* function that accumulates bytes and decrypts
-    complete length-prefixed Fernet tokens.  Sequential calls from
-    relay_stream's ``process_and_yield`` are safe (each call is awaited
-    before the next)."""
-    from cryptography.fernet import Fernet
-    key = get_fixed_base64_from_utf8_string(passphrase)
-    dec = Fernet(key)
-    buf = bytearray()
-    def decrypt(chunk: bytes) -> bytes:
-        buf.extend(chunk)
-        out = bytearray()
-        while len(buf) >= 4:
-            token_len = struct.unpack(">I", buf[:4])[0]
-            if len(buf) < 4 + token_len:
-                break
-            token = bytes(buf[4:4 + token_len])
-            del buf[:4 + token_len]
-            out.extend(dec.decrypt(token))
-        return bytes(out)
-    return decrypt
+# ``make_encrypt_func`` and ``make_decrypt_func`` live in
+# ``txwtf_tools.backup`` and handle length-prefixed Fernet tokens.
+# test_03 still needs an encrypt func for the raw relay_stream path;
+# test_05 now delegates to ``do_restore`` which handles decrypt internally.
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +275,7 @@ class TestBackupRoundTrip:
         export_url = f"{INCUS_API}/1.0/images/{fp}/export"
         sftp_url = f"sftp://{SFTP_USER}@{SFTP_HOST}{SFTP_DIR}/{BACKUP_FILENAME}"
 
-        encrypt_func = _make_encrypt_func(PASSPHRASE)
+        encrypt_func = make_encrypt_func(PASSPHRASE)
 
         asyncio.run(relay_stream(
             get_url=export_url,
@@ -342,25 +308,21 @@ class TestBackupRoundTrip:
         print("Deleted original image and container from cluster")
 
     def test_05_stream_from_sftp(self):
-        """Stream from SFTP → decrypt → Incus import API (no temp files)."""
+        """Stream from SFTP → decrypt → Incus import API via do_restore."""
         sftp_url = f"sftp://{SFTP_USER}@{SFTP_HOST}{SFTP_DIR}/{BACKUP_FILENAME}"
-        import_url = f"{INCUS_API}/1.0/images"
 
-        decrypt_func = _make_decrypt_func(PASSPHRASE)
-
-        asyncio.run(relay_stream(
-            get_url=sftp_url,
-            post_urls=[import_url],
-            process_func=decrypt_func,
+        do_restore(
+            sftp_url=sftp_url,
+            target_endpoint=INCUS_API,
+            passphrase=PASSPHRASE,
+            cert_path=INCUS_CERT,
+            key_path=INCUS_KEY,
+            verify_target=False,
+            compress=False,
+            encrypt=True,
             chunk_size=512 * 1024,
-            queue_maxsize=20,
-            get_config={"known_hosts": None},
-            post_headers=[{
-                "Content-Type": "application/octet-stream",
-                "X-Incus-public": "false",
-            }],
-            post_configs=[{**_incus_api_ssl_config(), "timeout": {"total": 600}}],
-        ))
+            max_queue_size=20,
+        )
 
         # Wait for image to appear (import is async)
         fp = _state.get("fingerprint")

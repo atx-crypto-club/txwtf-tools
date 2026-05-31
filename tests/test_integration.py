@@ -1174,3 +1174,116 @@ class TestRateLimitedRelay:
 
         assert dst.read_bytes() == data
         assert elapsed >= 1.0, f"Expected >= 1.0s, got {elapsed:.2f}s"
+
+
+class TestEncryptDecryptRoundTrip:
+    """Encrypt → file → decrypt round-trip using relay_stream with
+    length-prefixed Fernet tokens (same format as do_store / do_restore)."""
+
+    def test_encrypt_file_decrypt(self, integration_dir):
+        """Encrypt data to a file, then decrypt back — verifies the
+        make_encrypt_func / make_decrypt_func pipeline end-to-end."""
+        from txwtf_tools.backup import make_decrypt_func, make_encrypt_func
+        from txwtf_tools.relay import relay
+
+        src = integration_dir / "plain.bin"
+        enc = integration_dir / "encrypted.bin"
+        dst = integration_dir / "decrypted.bin"
+        data = os.urandom(50_000)
+        src.write_bytes(data)
+
+        passphrase = "integration-test-key"
+
+        # Step 1: file → encrypt → file
+        relay(
+            get_url=f"file://{src}",
+            post_urls=[f"file://{enc}"],
+            process_func=make_encrypt_func(passphrase),
+            chunk_size=8192,
+            queue_maxsize=8,
+        )
+
+        enc_data = enc.read_bytes()
+        assert len(enc_data) > len(data), "Encrypted data should be larger"
+        assert enc_data != data
+
+        # Step 2: file → decrypt → file
+        relay(
+            get_url=f"file://{enc}",
+            post_urls=[f"file://{dst}"],
+            process_func=make_decrypt_func(passphrase),
+            chunk_size=8192,
+            queue_maxsize=8,
+        )
+
+        assert dst.read_bytes() == data
+
+    def test_compress_encrypt_file_decrypt_decompress(self, integration_dir):
+        """Full compress+encrypt → file → decrypt+decompress round-trip
+        matching the do_store / do_restore pipeline.
+
+        The store direction uses manual compress+encrypt (matching do_store's
+        streamer-based approach with finalize_callback), while the restore
+        direction uses relay with chained decrypt+decompress (matching
+        do_restore).
+        """
+        import zlib
+
+        from txwtf_tools.backup import (
+            chain_functions,
+            make_decrypt_func,
+            make_encrypt_func,
+        )
+        from txwtf_tools.relay import relay
+
+        src = integration_dir / "plain.bin"
+        enc = integration_dir / "stored.bin"
+        dst = integration_dir / "restored.bin"
+        # Compressible data for a more realistic test
+        data = b"ABCDEFGH" * 10_000
+        src.write_bytes(data)
+
+        passphrase = "compress-encrypt-test"
+
+        # Store path: compress then encrypt, with proper flush
+        # (mirrors do_store's streamer + finalize_callback approach)
+        compressor = zlib.compressobj(9, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+        encrypt = make_encrypt_func(passphrase)
+        stored = bytearray()
+        chunk_size = 8192
+        with open(src, "rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                compressed = compressor.compress(chunk)
+                if compressed:
+                    stored.extend(encrypt(compressed))
+        flushed = compressor.flush(zlib.Z_FINISH)
+        if flushed:
+            stored.extend(encrypt(flushed))
+        enc.write_bytes(bytes(stored))
+
+        assert len(stored) < len(data), "Compressed+encrypted should be smaller for repetitive data"
+
+        # Restore path: decrypt then decompress via relay
+        # (mirrors do_restore's relay-based approach)
+        decrypt = make_decrypt_func(passphrase)
+        decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+
+        def decompress_chunk(chunk: bytes) -> bytes:
+            if not chunk:
+                return b""
+            return decompressor.decompress(chunk)
+
+        restore_func = chain_functions(decrypt, decompress_chunk)
+
+        relay(
+            get_url=f"file://{enc}",
+            post_urls=[f"file://{dst}"],
+            process_func=restore_func,
+            chunk_size=8192,
+            queue_maxsize=8,
+        )
+
+        assert dst.read_bytes() == data

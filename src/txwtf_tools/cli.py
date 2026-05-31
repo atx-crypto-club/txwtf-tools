@@ -216,3 +216,66 @@ def lxd_store(
         max_queue_size=queue_maxsize,
         rate_limit=rate_limit,
     )
+
+
+# ---------------------------------------------------------------------------
+# lxd-restore command
+# ---------------------------------------------------------------------------
+
+@cli.command("lxd-restore")
+@click.argument("sftp_url")
+@click.argument("target_endpoint")
+@click.option(
+    "--passphrase",
+    prompt=True,
+    hide_input=True,
+    help="Passphrase for symmetric decryption.",
+)
+@click.option("--cert", required=True, type=click.Path(exists=True), help="Client certificate path.")
+@click.option("--key", required=True, type=click.Path(exists=True), help="Client key path.")
+@click.option("--ca", type=click.Path(exists=True), default=None, help="Target cluster CA cert.")
+@click.option("--no-verify", is_flag=True, default=False, help="Disable TLS verification for target.")
+@click.option("--no-decompress", is_flag=True, default=False, help="Disable decompression.")
+@click.option("--no-decrypt", is_flag=True, default=False, help="Disable decryption.")
+@click.option("--chunk-size", default=512 * 1024, show_default=True, help="Chunk size in bytes.")
+@click.option("--queue-maxsize", default=20, show_default=True, help="Max queue depth.")
+@click.option(
+    "--rate-limit", type=float, default=None,
+    help="Max input read rate in bytes/sec (e.g. 1048576 for 1 MB/s). 0 = unlimited.",
+)
+def lxd_restore(
+    sftp_url,
+    target_endpoint,
+    passphrase,
+    cert,
+    key,
+    ca,
+    no_verify,
+    no_decompress,
+    no_decrypt,
+    chunk_size,
+    queue_maxsize,
+    rate_limit,
+):
+    """Restore an LXD/Incus image from an encrypted SFTP backup at SFTP_URL
+    to TARGET_ENDPOINT.
+
+    The inverse of lxd-store: reads from SFTP, decrypts, decompresses,
+    and streams to the Incus/LXD image import API.
+    """
+    from .backup import do_restore
+
+    do_restore(
+        sftp_url=sftp_url,
+        target_endpoint=target_endpoint,
+        passphrase=passphrase,
+        cert_path=cert,
+        key_path=key,
+        ca_path=ca,
+        verify_target=not no_verify,
+        compress=not no_decompress,
+        encrypt=not no_decrypt,
+        chunk_size=chunk_size,
+        max_queue_size=queue_maxsize,
+        rate_limit=rate_limit,
+    )
