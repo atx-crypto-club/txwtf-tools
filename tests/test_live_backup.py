@@ -67,6 +67,9 @@ BACKUP_FILENAME = f"txwtf-ci-{RUN_ID}-backup.enc"
 PASSPHRASE = f"test-passphrase-{RUN_ID}"
 CANARY_CONTENT = f"txwtf-ci-canary-{RUN_ID}"
 
+# Root of the repo (parent of tests/)
+_REPO_ROOT = os.path.join(os.path.dirname(__file__), "..")
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -240,6 +243,11 @@ class TestBackupRoundTrip:
         )
         assert "OK" in r.stdout, f"Cannot reach SFTP host {SFTP_HOST}: {r.stderr}"
 
+        # Persist RUN_ID so CI cleanup-on-failure can scope to this run only,
+        # without disturbing resources from a concurrent run on another runner.
+        with open(os.path.join(_REPO_ROOT, ".txwtf-ci-run-id"), "w") as f:
+            f.write(RUN_ID)
+
     @staticmethod
     def _try_cache_image() -> bool:
         """Attempt to cache the image from the remote if not present."""
@@ -286,6 +294,11 @@ class TestBackupRoundTrip:
         fp = _get_image_fingerprint(IMAGE_ALIAS)
         assert fp, f"Could not get fingerprint for {IMAGE_ALIAS}"
         _state["fingerprint"] = fp
+        # Persist fingerprint so CI cleanup-on-failure can delete by
+        # fingerprint if the alias was never created after re-import.
+        fp_file = os.path.join(_REPO_ROOT, ".txwtf-ci-fingerprint")
+        with open(fp_file, "w") as f:
+            f.write(fp)
         print(f"Image fingerprint: {fp}")
 
     def test_03_stream_to_sftp(self):
@@ -397,3 +410,9 @@ class TestBackupRoundTrip:
         assert not _container_exists(RESTORED_NAME)
         assert not _image_exists(IMAGE_ALIAS)
         assert not _image_exists(RESTORED_ALIAS)
+
+        # Remove ephemeral state files
+        for name in (".txwtf-ci-run-id", ".txwtf-ci-fingerprint"):
+            path = os.path.join(_REPO_ROOT, name)
+            if os.path.exists(path):
+                os.remove(path)

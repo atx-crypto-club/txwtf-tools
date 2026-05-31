@@ -60,13 +60,29 @@ jobs:
       - name: Cleanup on failure
         if: failure()
         run: |
-          # Best-effort cleanup of any leftover txwtf-ci- resources.
-          # Safe for concurrent runs: each test uses a unique uuid4 RUN_ID,
-          # and this runner only processes one job at a time (single runner).
-          for c in $(incus list --format csv -c n | grep '^txwtf-ci-'); do
+          # Scoped cleanup: only delete resources belonging to THIS run's
+          # RUN_ID so concurrent runs on other runners are not disturbed.
+          RUN_ID=""
+          if [ -f .txwtf-ci-run-id ]; then
+            RUN_ID=$(cat .txwtf-ci-run-id)
+          fi
+          if [ -z "$RUN_ID" ]; then
+            echo "WARNING: no .txwtf-ci-run-id found, skipping cleanup"
+            exit 0
+          fi
+          echo "Cleaning up resources for RUN_ID=$RUN_ID"
+          for c in "txwtf-ci-${RUN_ID}" "txwtf-ci-${RUN_ID}-restored"; do
             incus delete "$c" --force 2>/dev/null || true
           done
-          for img in $(incus image alias list --format csv | grep '^txwtf-ci-' | cut -d, -f1); do
+          for img in "txwtf-ci-${RUN_ID}-img" "txwtf-ci-${RUN_ID}-restored-img"; do
             incus image delete "$img" 2>/dev/null || true
           done
-          ssh -o StrictHostKeyChecking=no tfx@star-01 'rm -f /media/catx-easystore/txwtf-tools-tests/txwtf-ci-*' 2>/dev/null || true
+          ssh -o StrictHostKeyChecking=no tfx@star-01 "rm -f /media/catx-easystore/txwtf-tools-tests/txwtf-ci-${RUN_ID}-backup.enc" 2>/dev/null || true
+          # Also try deleting the image by fingerprint (covers the case
+          # where import succeeded but alias creation didn't).
+          if [ -f .txwtf-ci-fingerprint ]; then
+            FP=$(cat .txwtf-ci-fingerprint)
+            incus image delete "$FP" 2>/dev/null || true
+            rm -f .txwtf-ci-fingerprint
+          fi
+          rm -f .txwtf-ci-run-id
