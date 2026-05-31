@@ -11,6 +11,7 @@ import time
 import zlib
 
 from cryptography.fernet import Fernet
+from tqdm import tqdm
 
 from .relay import relay
 from .streamer import create_ssl_connector, streamer  # noqa: F401 — re-export
@@ -523,8 +524,6 @@ def do_store_all(
         print("No matching instances found.")
         return {}
 
-    print(f"Found {len(names)} instance(s) to back up: {', '.join(names)}")
-
     # Build target filename suffix based on flags.
     suffix = ".img"
     if compress:
@@ -536,35 +535,47 @@ def do_store_all(
     base = target_url.rstrip("/")
 
     results: dict[str, str] = {}
-    for i, name in enumerate(names, 1):
-        alias = f"{project}-{name}-backup"
-        dest = f"{base}/{alias}{suffix}"
-        print(f"\n[{i}/{len(names)}] Backing up '{name}' → {dest}")
 
-        try:
-            do_store(
-                project=project,
-                vm_name=name,
-                source_endpoint=endpoint,
-                sftp_url=dest,
-                passphrase=passphrase,
-                cert_path=cert_path,
-                key_path=key_path,
-                ca_path=ca_path,
-                compress=compress,
-                encrypt=encrypt,
-                chunk_size=chunk_size,
-                max_queue_size=max_queue_size,
-                rate_limit=rate_limit,
-            )
-            results[name] = "ok"
-            print(f"  ✓ '{name}' backed up successfully.")
-        except Exception as exc:
-            results[name] = str(exc)
-            print(f"  ✗ '{name}' failed: {exc}")
+    # Outer progress bar tracks VM count; inner bars from streamer/relay
+    # appear below it via tqdm's positioning.
+    with tqdm(
+        total=len(names),
+        unit="vm",
+        desc="Overall",
+        position=0,
+        leave=True,
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} VMs [{elapsed}<{remaining}]",
+    ) as outer:
+        for name in names:
+            alias = f"{project}-{name}-backup"
+            dest = f"{base}/{alias}{suffix}"
+            outer.set_postfix_str(name, refresh=True)
+
+            try:
+                do_store(
+                    project=project,
+                    vm_name=name,
+                    source_endpoint=endpoint,
+                    sftp_url=dest,
+                    passphrase=passphrase,
+                    cert_path=cert_path,
+                    key_path=key_path,
+                    ca_path=ca_path,
+                    compress=compress,
+                    encrypt=encrypt,
+                    chunk_size=chunk_size,
+                    max_queue_size=max_queue_size,
+                    rate_limit=rate_limit,
+                )
+                results[name] = "ok"
+            except Exception as exc:
+                results[name] = str(exc)
+                tqdm.write(f"  ✗ '{name}' failed: {exc}")
+
+            outer.update(1)
 
     # Summary.
     ok = sum(1 for v in results.values() if v == "ok")
     failed = len(results) - ok
-    print(f"\nDone: {ok} succeeded, {failed} failed out of {len(results)} total.")
+    tqdm.write(f"\nDone: {ok} succeeded, {failed} failed out of {len(results)} total.")
     return results
