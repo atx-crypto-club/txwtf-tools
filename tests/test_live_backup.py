@@ -115,7 +115,7 @@ def _get_image_fingerprint(alias: str) -> str | None:
 def _cleanup_container(name: str):
     """Force-delete a container if it exists."""
     if _container_exists(name):
-        _incus(f"delete {name} --force", check=False, timeout=120)
+        _incus(f"delete {name} --force", check=False, timeout=300)
 
 
 def _cleanup_image(alias: str):
@@ -250,7 +250,7 @@ class TestBackupRoundTrip:
         _full_cleanup()
 
         target = f"--target {INCUS_TARGET}" if INCUS_TARGET else ""
-        r = _incus(f"launch {BASE_IMAGE} {CONTAINER_NAME} {target}", timeout=120)
+        r = _incus(f"launch {BASE_IMAGE} {CONTAINER_NAME} {target}", timeout=300)
         assert r.returncode == 0, f"Failed to launch: {r.stderr}"
 
         # Wait for container to be ready
@@ -274,7 +274,7 @@ class TestBackupRoundTrip:
 
     def test_02_publish_image(self):
         """Stop container and publish as image."""
-        _incus(f"stop {CONTAINER_NAME}", timeout=120)
+        _incus(f"stop {CONTAINER_NAME}", timeout=300)
         r = _incus(f"publish {CONTAINER_NAME} --alias {IMAGE_ALIAS}", timeout=300)
         assert r.returncode == 0, f"Publish failed: {r.stderr}"
         assert _image_exists(IMAGE_ALIAS)
@@ -366,7 +366,7 @@ class TestBackupRoundTrip:
         target = f"--target {INCUS_TARGET}" if INCUS_TARGET else ""
         r = _incus(
             f"launch {RESTORED_ALIAS} {RESTORED_NAME} {target}",
-            timeout=120,
+            timeout=300,
         )
         assert r.returncode == 0, f"Launch failed: {r.stderr}"
 
@@ -439,7 +439,7 @@ class TestMultiVMBackupRoundTrip:
         target = f"--target {INCUS_TARGET}" if INCUS_TARGET else ""
 
         for name in MULTI_NAMES:
-            r = _incus(f"launch {BASE_IMAGE} {name} {target}", timeout=120)
+            r = _incus(f"launch {BASE_IMAGE} {name} {target}", timeout=300)
             assert r.returncode == 0, f"Failed to launch {name}: {r.stderr}"
 
             # Wait for ready
@@ -462,7 +462,7 @@ class TestMultiVMBackupRoundTrip:
     def test_02_store_all(self):
         """Stop all containers and back them all up with do_store_all."""
         for name in MULTI_NAMES:
-            _incus(f"stop {name}", timeout=120)
+            _incus(f"stop {name}", timeout=300)
 
         sftp_base = f"sftp://{SFTP_USER}@{SFTP_HOST}{SFTP_DIR}"
 
@@ -556,7 +556,7 @@ class TestMultiVMBackupRoundTrip:
             restored_name = f"{name}-restored"
             restored_alias = f"default-{name}-backup"
 
-            r = _incus(f"launch {restored_alias} {restored_name} {target}", timeout=120)
+            r = _incus(f"launch {restored_alias} {restored_name} {target}", timeout=300)
             assert r.returncode == 0, f"Failed to launch restored {name}: {r.stderr}"
 
             # Wait for ready
