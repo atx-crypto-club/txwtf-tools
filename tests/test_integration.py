@@ -6,6 +6,7 @@ to stream data between them, proving the full pipeline works over real TCP.
 """
 
 import asyncio
+import hashlib
 import multiprocessing
 import os
 import ssl
@@ -595,3 +596,459 @@ class TestStreamerIntegration:
             sink_proc.terminate()
             src_proc.join(timeout=5)
             sink_proc.join(timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# Large-data / slow-consumer helpers
+# ---------------------------------------------------------------------------
+
+def _run_streaming_source_server(host, port, total_bytes, chunk_size, started_event, digest_path):
+    """
+    HTTP source that generates *total_bytes* of deterministic pseudo-random data
+    on the fly (no temp file), streaming it in *chunk_size* chunks.
+    Writes the SHA-256 hex digest of the full payload to *digest_path*.
+    """
+    import aiohttp.web
+
+    async def handle_get(request):
+        h = hashlib.sha256()
+        remaining = total_bytes
+
+        async def body_gen():
+            nonlocal remaining
+            seed = 0
+            while remaining > 0:
+                n = min(chunk_size, remaining)
+                # deterministic chunk seeded by offset
+                chunk = seed.to_bytes(8, "little") * (n // 8 + 1)
+                chunk = chunk[:n]
+                h.update(chunk)
+                remaining -= n
+                seed += 1
+                yield chunk
+            # write digest so the test can compare
+            Path(digest_path).write_text(h.hexdigest())
+
+        resp = aiohttp.web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "application/octet-stream",
+                "Content-Length": str(total_bytes),
+            },
+        )
+        await resp.prepare(request)
+        async for chunk in body_gen():
+            await resp.write(chunk)
+        await resp.write_eof()
+        return resp
+
+    app = aiohttp.web.Application()
+    app.router.add_get("/data", handle_get)
+    runner = aiohttp.web.AppRunner(app)
+
+    async def start():
+        await runner.setup()
+        site = aiohttp.web.TCPSite(runner, host, port)
+        await site.start()
+        started_event.set()
+        while True:
+            await asyncio.sleep(3600)
+
+    asyncio.run(start())
+
+
+def _run_throttled_sink_server(
+    host, port, output_path, digest_path, started_event, delay_per_mb=0.0, timing_path=None
+):
+    """
+    HTTP sink that accepts POST on /upload, writing body to *output_path*.
+    Optionally sleeps *delay_per_mb* seconds per MB received to simulate a slow
+    consumer.  Writes SHA-256 digest to *digest_path* and elapsed time to *timing_path*.
+    """
+    import aiohttp.web
+
+    async def handle_post(request):
+        t0 = time.monotonic()
+        h = hashlib.sha256()
+        received = 0
+        with open(str(output_path), "wb") as f:
+            async for chunk in request.content.iter_any():
+                f.write(chunk)
+                h.update(chunk)
+                received += len(chunk)
+                if delay_per_mb > 0:
+                    delay = delay_per_mb * (len(chunk) / (1024 * 1024))
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+        elapsed = time.monotonic() - t0
+        Path(digest_path).write_text(h.hexdigest())
+        if timing_path:
+            Path(timing_path).write_text(f"{elapsed:.6f}")
+        return aiohttp.web.json_response({"status": "ok", "bytes": received})
+
+    app = aiohttp.web.Application(client_max_size=0)  # no body size limit
+    app.router.add_post("/upload", handle_post)
+    runner = aiohttp.web.AppRunner(app)
+
+    async def start():
+        await runner.setup()
+        site = aiohttp.web.TCPSite(runner, host, port)
+        await site.start()
+        started_event.set()
+        while True:
+            await asyncio.sleep(3600)
+
+    asyncio.run(start())
+
+
+# ---------------------------------------------------------------------------
+# Large-data & slow-consumer tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.integration
+class TestLargeDataRelay:
+    """Stream large payloads (multi-MB) through the relay and verify integrity."""
+
+    def test_large_1to1_relay(self, integration_dir):
+        """1:1 relay of 8 MB — verify SHA-256 digest matches."""
+        total_bytes = 8 * 1024 * 1024  # 8 MB
+        chunk_size = 64 * 1024
+
+        src_digest = str(integration_dir / "src_digest.txt")
+        dst_file = str(integration_dir / "dest.bin")
+        dst_digest = str(integration_dir / "dst_digest.txt")
+
+        src_started = multiprocessing.Event()
+        sink_started = multiprocessing.Event()
+
+        src_proc = multiprocessing.Process(
+            target=_run_streaming_source_server,
+            args=("127.0.0.1", 18110, total_bytes, chunk_size, src_started, src_digest),
+            daemon=True,
+        )
+        sink_proc = multiprocessing.Process(
+            target=_run_throttled_sink_server,
+            args=("127.0.0.1", 18111, dst_file, dst_digest, sink_started),
+            daemon=True,
+        )
+        src_proc.start()
+        sink_proc.start()
+
+        try:
+            _wait_for_event(src_started)
+            _wait_for_event(sink_started)
+
+            from txwtf_tools.relay import relay
+
+            relay(
+                get_url="http://127.0.0.1:18110/data",
+                post_urls=["http://127.0.0.1:18111/upload"],
+                chunk_size=chunk_size,
+                queue_maxsize=32,
+                get_config={"verify": False, "timeout": {"total": 120}},
+                post_configs=[{"verify": False, "timeout": {"total": 120}}],
+            )
+
+            sd = Path(src_digest).read_text()
+            dd = Path(dst_digest).read_text()
+            assert sd == dd, f"SHA-256 mismatch: src={sd} dst={dd}"
+            assert os.path.getsize(dst_file) == total_bytes
+        finally:
+            src_proc.terminate()
+            sink_proc.terminate()
+            src_proc.join(timeout=5)
+            sink_proc.join(timeout=5)
+
+
+@pytest.mark.integration
+class TestSlowConsumerFanout:
+    """Fan-out where sinks consume at different rates.
+
+    Proves that:
+    1. All destinations receive correct, complete data.
+    2. The fast consumer finishes well before the slow one (no head-of-line blocking).
+    """
+
+    def test_fanout_fast_and_slow(self, integration_dir):
+        """Fan-out to a fast sink and a slow sink (0.05s delay/MB).
+        Verify both get identical data and the fast one isn't starved."""
+        total_bytes = 4 * 1024 * 1024  # 4 MB
+        chunk_size = 64 * 1024
+
+        src_digest = str(integration_dir / "src_digest.txt")
+
+        fast_file = str(integration_dir / "fast.bin")
+        fast_digest = str(integration_dir / "fast_digest.txt")
+        fast_timing = str(integration_dir / "fast_timing.txt")
+
+        slow_file = str(integration_dir / "slow.bin")
+        slow_digest = str(integration_dir / "slow_digest.txt")
+        slow_timing = str(integration_dir / "slow_timing.txt")
+
+        src_started = multiprocessing.Event()
+        fast_started = multiprocessing.Event()
+        slow_started = multiprocessing.Event()
+
+        src_proc = multiprocessing.Process(
+            target=_run_streaming_source_server,
+            args=("127.0.0.1", 18112, total_bytes, chunk_size, src_started, src_digest),
+            daemon=True,
+        )
+        fast_proc = multiprocessing.Process(
+            target=_run_throttled_sink_server,
+            args=("127.0.0.1", 18113, fast_file, fast_digest, fast_started, 0.0, fast_timing),
+            daemon=True,
+        )
+        slow_proc = multiprocessing.Process(
+            target=_run_throttled_sink_server,
+            args=("127.0.0.1", 18114, slow_file, slow_digest, slow_started, 0.05, slow_timing),
+            daemon=True,
+        )
+        src_proc.start()
+        fast_proc.start()
+        slow_proc.start()
+
+        try:
+            _wait_for_event(src_started)
+            _wait_for_event(fast_started)
+            _wait_for_event(slow_started)
+
+            from txwtf_tools.relay import relay
+
+            relay(
+                get_url="http://127.0.0.1:18112/data",
+                post_urls=[
+                    "http://127.0.0.1:18113/upload",
+                    "http://127.0.0.1:18114/upload",
+                ],
+                chunk_size=chunk_size,
+                queue_maxsize=16,
+                get_config={"verify": False, "timeout": {"total": 120}},
+                post_configs=[
+                    {"verify": False, "timeout": {"total": 120}},
+                    {"verify": False, "timeout": {"total": 120}},
+                ],
+            )
+
+            # Both must have correct data
+            sd = Path(src_digest).read_text()
+            fd = Path(fast_digest).read_text()
+            sld = Path(slow_digest).read_text()
+            assert sd == fd, f"Fast digest mismatch: src={sd} fast={fd}"
+            assert sd == sld, f"Slow digest mismatch: src={sd} slow={sld}"
+            assert os.path.getsize(fast_file) == total_bytes
+            assert os.path.getsize(slow_file) == total_bytes
+
+            # Check timing — fast should be noticeably quicker than slow
+            fast_elapsed = float(Path(fast_timing).read_text())
+            slow_elapsed = float(Path(slow_timing).read_text())
+            print(f"\n  Fast consumer: {fast_elapsed:.3f}s")
+            print(f"  Slow consumer: {slow_elapsed:.3f}s")
+            print(f"  Ratio (slow/fast): {slow_elapsed / max(fast_elapsed, 0.001):.1f}x")
+
+            # The slow consumer should take measurably longer
+            assert slow_elapsed > fast_elapsed, (
+                f"Slow consumer ({slow_elapsed:.3f}s) should be slower than fast ({fast_elapsed:.3f}s)"
+            )
+        finally:
+            src_proc.terminate()
+            fast_proc.terminate()
+            slow_proc.terminate()
+            src_proc.join(timeout=5)
+            fast_proc.join(timeout=5)
+            slow_proc.join(timeout=5)
+
+    def test_fanout_with_per_queue_maxsize(self, integration_dir):
+        """Give the slow consumer a larger buffer to absorb bursts."""
+        total_bytes = 4 * 1024 * 1024  # 4 MB
+        chunk_size = 64 * 1024
+
+        src_digest = str(integration_dir / "src_digest.txt")
+
+        fast_file = str(integration_dir / "fast.bin")
+        fast_digest = str(integration_dir / "fast_digest.txt")
+        fast_timing = str(integration_dir / "fast_timing.txt")
+
+        slow_file = str(integration_dir / "slow.bin")
+        slow_digest = str(integration_dir / "slow_digest.txt")
+        slow_timing = str(integration_dir / "slow_timing.txt")
+
+        src_started = multiprocessing.Event()
+        fast_started = multiprocessing.Event()
+        slow_started = multiprocessing.Event()
+
+        src_proc = multiprocessing.Process(
+            target=_run_streaming_source_server,
+            args=("127.0.0.1", 18115, total_bytes, chunk_size, src_started, src_digest),
+            daemon=True,
+        )
+        fast_proc = multiprocessing.Process(
+            target=_run_throttled_sink_server,
+            args=("127.0.0.1", 18116, fast_file, fast_digest, fast_started, 0.0, fast_timing),
+            daemon=True,
+        )
+        slow_proc = multiprocessing.Process(
+            target=_run_throttled_sink_server,
+            args=("127.0.0.1", 18117, slow_file, slow_digest, slow_started, 0.05, slow_timing),
+            daemon=True,
+        )
+        src_proc.start()
+        fast_proc.start()
+        slow_proc.start()
+
+        try:
+            _wait_for_event(src_started)
+            _wait_for_event(fast_started)
+            _wait_for_event(slow_started)
+
+            from txwtf_tools.relay import relay
+
+            relay(
+                get_url="http://127.0.0.1:18115/data",
+                post_urls=[
+                    "http://127.0.0.1:18116/upload",
+                    "http://127.0.0.1:18117/upload",
+                ],
+                chunk_size=chunk_size,
+                queue_maxsize=16,
+                # Give the slow consumer (index 1) a 4x larger buffer
+                per_queue_maxsize=[16, 64],
+                get_config={"verify": False, "timeout": {"total": 120}},
+                post_configs=[
+                    {"verify": False, "timeout": {"total": 120}},
+                    {"verify": False, "timeout": {"total": 120}},
+                ],
+            )
+
+            # Both must have correct data
+            sd = Path(src_digest).read_text()
+            fd = Path(fast_digest).read_text()
+            sld = Path(slow_digest).read_text()
+            assert sd == fd, f"Fast digest mismatch"
+            assert sd == sld, f"Slow digest mismatch"
+            assert os.path.getsize(fast_file) == total_bytes
+            assert os.path.getsize(slow_file) == total_bytes
+
+            fast_elapsed = float(Path(fast_timing).read_text())
+            slow_elapsed = float(Path(slow_timing).read_text())
+            print(f"\n  Fast consumer (buf=16): {fast_elapsed:.3f}s")
+            print(f"  Slow consumer (buf=64): {slow_elapsed:.3f}s")
+            print(f"  Ratio (slow/fast): {slow_elapsed / max(fast_elapsed, 0.001):.1f}x")
+
+            assert slow_elapsed > fast_elapsed
+        finally:
+            src_proc.terminate()
+            fast_proc.terminate()
+            slow_proc.terminate()
+            src_proc.join(timeout=5)
+            fast_proc.join(timeout=5)
+            slow_proc.join(timeout=5)
+
+    def test_fanout_three_speeds(self, integration_dir):
+        """Fan-out to three sinks: fast, medium (0.02s/MB), slow (0.08s/MB)."""
+        total_bytes = 2 * 1024 * 1024  # 2 MB
+        chunk_size = 64 * 1024
+
+        src_digest = str(integration_dir / "src_digest.txt")
+
+        files = {}
+        digests = {}
+        timings = {}
+        for label in ("fast", "medium", "slow"):
+            files[label] = str(integration_dir / f"{label}.bin")
+            digests[label] = str(integration_dir / f"{label}_digest.txt")
+            timings[label] = str(integration_dir / f"{label}_timing.txt")
+
+        src_started = multiprocessing.Event()
+        fast_started = multiprocessing.Event()
+        med_started = multiprocessing.Event()
+        slow_started = multiprocessing.Event()
+
+        src_proc = multiprocessing.Process(
+            target=_run_streaming_source_server,
+            args=("127.0.0.1", 18118, total_bytes, chunk_size, src_started, src_digest),
+            daemon=True,
+        )
+        fast_proc = multiprocessing.Process(
+            target=_run_throttled_sink_server,
+            args=(
+                "127.0.0.1", 18119,
+                files["fast"], digests["fast"], fast_started,
+                0.0, timings["fast"],
+            ),
+            daemon=True,
+        )
+        med_proc = multiprocessing.Process(
+            target=_run_throttled_sink_server,
+            args=(
+                "127.0.0.1", 18120,
+                files["medium"], digests["medium"], med_started,
+                0.02, timings["medium"],
+            ),
+            daemon=True,
+        )
+        slow_proc = multiprocessing.Process(
+            target=_run_throttled_sink_server,
+            args=(
+                "127.0.0.1", 18121,
+                files["slow"], digests["slow"], slow_started,
+                0.08, timings["slow"],
+            ),
+            daemon=True,
+        )
+        src_proc.start()
+        fast_proc.start()
+        med_proc.start()
+        slow_proc.start()
+
+        try:
+            _wait_for_event(src_started)
+            _wait_for_event(fast_started)
+            _wait_for_event(med_started)
+            _wait_for_event(slow_started)
+
+            from txwtf_tools.relay import relay
+
+            relay(
+                get_url="http://127.0.0.1:18118/data",
+                post_urls=[
+                    "http://127.0.0.1:18119/upload",
+                    "http://127.0.0.1:18120/upload",
+                    "http://127.0.0.1:18121/upload",
+                ],
+                chunk_size=chunk_size,
+                queue_maxsize=16,
+                get_config={"verify": False, "timeout": {"total": 120}},
+                post_configs=[
+                    {"verify": False, "timeout": {"total": 120}},
+                    {"verify": False, "timeout": {"total": 120}},
+                    {"verify": False, "timeout": {"total": 120}},
+                ],
+            )
+
+            sd = Path(src_digest).read_text()
+            for label in ("fast", "medium", "slow"):
+                dd = Path(digests[label]).read_text()
+                assert sd == dd, f"{label} digest mismatch: src={sd} {label}={dd}"
+                assert os.path.getsize(files[label]) == total_bytes
+
+            elapsed = {
+                label: float(Path(timings[label]).read_text())
+                for label in ("fast", "medium", "slow")
+            }
+            print(f"\n  Fast:   {elapsed['fast']:.3f}s")
+            print(f"  Medium: {elapsed['medium']:.3f}s")
+            print(f"  Slow:   {elapsed['slow']:.3f}s")
+
+            # Slow should be slowest, medium in between
+            assert elapsed["slow"] > elapsed["fast"]
+            assert elapsed["slow"] >= elapsed["medium"]
+        finally:
+            src_proc.terminate()
+            fast_proc.terminate()
+            med_proc.terminate()
+            slow_proc.terminate()
+            src_proc.join(timeout=5)
+            fast_proc.join(timeout=5)
+            med_proc.join(timeout=5)
+            slow_proc.join(timeout=5)
