@@ -239,7 +239,6 @@ async def get_input_stream(uri: str, **input_kwargs: Any) -> AsyncGenerator[byte
 
 
 async def consumer_gen(
-    total_size: int,
     uri: str,
     q: asyncio.Queue,
     callback: Optional[Callable[[bytes], Optional[bytes]]] = None,
@@ -247,7 +246,6 @@ async def consumer_gen(
 ) -> AsyncGenerator[bytes, None]:
     """Consume chunks from *q*, optionally transform them, and yield results."""
     with async_tqdm(
-        total=total_size,
         unit="B",
         unit_scale=True,
         unit_divisor=1024,
@@ -290,7 +288,6 @@ async def process_stream(
     if len(output_uris) != len(output_kwargs_list):
         raise ValueError("Number of output URIs must match output kwargs list.")
 
-    input_size = await get_input_stream_size(input_uri, **input_kwargs)
     input_gen = await get_input_stream(input_uri, **input_kwargs)
 
     all_queues = [
@@ -301,7 +298,6 @@ async def process_stream(
     tasks = []
     for uri, kw, q in zip(output_uris, output_kwargs_list, all_queues):
         gen = consumer_gen(
-            input_size,
             uri,
             q,
             callback=kw.get("callback"),
