@@ -346,7 +346,7 @@ def do_store(
     ca_path: str | None = None,
     compress: bool = True,
     encrypt: bool = True,
-    chunk_size: int = 1024 * 1024,
+    chunk_size: int = 256 * 1024,
     max_queue_size: int = 512,
     rate_limit: float | None = None,
 ):
