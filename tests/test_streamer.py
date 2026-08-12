@@ -62,6 +62,18 @@ class TestGetInputStream:
 
 
 class TestConsumerGen:
+    """consumer_gen(uri, q, callback=None, finalize_callback=None).
+
+    These used to pass a leading byte-count -- consumer_gen(10, uri, q) -- and
+    had failed since the repo's first commit, because that argument does not
+    exist. The progress bar here is deliberately total-less: the commit that
+    shaped this code removed the separate get_input_stream_size() call from
+    process_stream rather than pay an extra HEAD/stat round-trip just to size
+    a bar, and no caller has passed a total since. Do not reintroduce one here
+    without also giving process_stream something to pass.
+    """
+
+
     @pytest.mark.asyncio
     async def test_passthrough(self):
         q = asyncio.Queue()
@@ -70,7 +82,7 @@ class TestConsumerGen:
         await q.put(None)
 
         chunks = []
-        async for chunk in consumer_gen(10, "file:///test", q):
+        async for chunk in consumer_gen("file:///test", q):
             chunks.append(chunk)
 
         assert chunks == [b"hello", b"world"]
@@ -82,7 +94,9 @@ class TestConsumerGen:
         await q.put(None)
 
         chunks = []
-        async for chunk in consumer_gen(5, "file:///test", q, callback=lambda c: c.upper()):
+        async for chunk in consumer_gen(
+            "file:///test", q, callback=lambda c: c.upper()
+        ):
             chunks.append(chunk)
 
         assert chunks == [b"HELLO"]
@@ -96,7 +110,7 @@ class TestConsumerGen:
 
         chunks = []
         async for chunk in consumer_gen(
-            10, "file:///test", q, callback=lambda c: None if c == b"hello" else c
+            "file:///test", q, callback=lambda c: None if c == b"hello" else c
         ):
             chunks.append(chunk)
 
@@ -110,7 +124,7 @@ class TestConsumerGen:
 
         chunks = []
         async for chunk in consumer_gen(
-            4, "file:///test", q, finalize_callback=lambda: b"FINAL"
+            "file:///test", q, finalize_callback=lambda: b"FINAL"
         ):
             chunks.append(chunk)
 
