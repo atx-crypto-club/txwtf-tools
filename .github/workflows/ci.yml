@@ -57,7 +57,12 @@ jobs:
         run: |
           python3 -m venv .venv
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install .
+          # ".[lxd]", not ".": pylxd is an optional extra (pyproject.toml:34)
+          # and test_live_backup imports it, so a bare install left the job
+          # failing with "ImportError: pylxd is required for LXD". That went
+          # unnoticed because this job needs the test matrix, which had been
+          # red since May, so it had never actually run.
+          .venv/bin/pip install ".[lxd]"
           .venv/bin/pip install pytest pytest-asyncio
 
       - name: Run live backup round-trip test
