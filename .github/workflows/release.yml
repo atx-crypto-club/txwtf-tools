@@ -10,6 +10,13 @@ permissions:
 
 jobs:
   test:
+    # NOTE: the expensive entries here are macOS and Windows, not Linux --
+    # GitHub bills macOS at 10x and Windows at 2x the Linux minute rate, so one
+    # release costs 4 macOS jobs at 10x plus 4 Windows jobs at 2x. There is
+    # nowhere on the fleet to move them: one Windows box (a roaming laptop,
+    # deliberately not a gate) and no macOS at all. If minutes stay tight,
+    # thinning this matrix is where the saving is, and that is a call about
+    # which platforms txwtf-tools promises to support.
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
@@ -39,7 +46,7 @@ jobs:
 
   publish:
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
 
     steps:
       - uses: actions/checkout@v4

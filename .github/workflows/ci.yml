@@ -8,7 +8,11 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Self-hosted: this matrix is 4 jobs on every push and pull request, which
+    # was the bulk of this repo's billable minutes. actions/setup-python still
+    # works here -- it fetches the interpreter into the runner's tool cache on
+    # first use for each version and reuses it afterwards.
+    runs-on: [self-hosted, Linux, X64]
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
